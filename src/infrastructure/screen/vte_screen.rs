@@ -1060,6 +1060,26 @@ impl ScreenPort for VteScreenAdapter {
             .ok_or(AppError::ScreenNotFound(id))?;
         Ok(std::mem::take(&mut screen.notifications))
     }
+
+    fn set_scrollback_offset(&mut self, _id: TerminalId, _offset: usize) -> Result<(), AppError> {
+        // VteScreenAdapter does not support scrollback
+        Ok(())
+    }
+
+    fn get_scrollback_offset(&self, _id: TerminalId) -> Result<usize, AppError> {
+        Ok(0)
+    }
+
+    fn get_max_scrollback(&self, _id: TerminalId) -> Result<usize, AppError> {
+        Ok(0)
+    }
+
+    fn is_alternate_screen(&self, id: TerminalId) -> Result<bool, AppError> {
+        self.screens
+            .get(&id)
+            .map(|s| s.is_alternate_screen)
+            .ok_or(AppError::ScreenNotFound(id))
+    }
 }
 
 #[cfg(test)]
@@ -4426,5 +4446,45 @@ mod tests {
             notifications.is_empty(),
             "OSC 777 with non-notify second param should be ignored"
         );
+    }
+
+    // ─── Scrollback stub tests ───
+
+    #[test]
+    fn scrollback_offset_always_zero() {
+        let mut adapter = VteScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        assert_eq!(adapter.get_scrollback_offset(id(1)).unwrap(), 0);
+    }
+
+    #[test]
+    fn scrollback_max_always_zero() {
+        let mut adapter = VteScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        assert_eq!(adapter.get_max_scrollback(id(1)).unwrap(), 0);
+    }
+
+    #[test]
+    fn set_scrollback_offset_noop() {
+        let mut adapter = VteScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        // Should not error, just no-op
+        adapter.set_scrollback_offset(id(1), 42).unwrap();
+        assert_eq!(adapter.get_scrollback_offset(id(1)).unwrap(), 0);
+    }
+
+    #[test]
+    fn is_alternate_screen_reflects_state() {
+        let mut adapter = VteScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        assert!(!adapter.is_alternate_screen(id(1)).unwrap());
+
+        // Switch to alternate screen
+        adapter.process(id(1), b"\x1b[?1049h").unwrap();
+        assert!(adapter.is_alternate_screen(id(1)).unwrap());
+
+        // Switch back
+        adapter.process(id(1), b"\x1b[?1049l").unwrap();
+        assert!(!adapter.is_alternate_screen(id(1)).unwrap());
     }
 }

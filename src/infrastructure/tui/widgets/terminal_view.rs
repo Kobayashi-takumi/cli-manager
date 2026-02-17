@@ -23,6 +23,7 @@ pub fn render(
     cursor_visible: bool,
     cwd_opt: Option<&str>,
     is_focused: bool,
+    scrollback_info: Option<(usize, usize)>,
 ) {
     // Split into CWD bar (1 line) + terminal content
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
@@ -116,6 +117,25 @@ pub fn render(
             let paragraph = Paragraph::new(lines);
             frame.render_widget(paragraph, content_area);
 
+            // Scrollback indicator
+            if let Some((offset, max)) = scrollback_info
+                && offset > 0
+            {
+                let indicator = format!("[{}/{}]", offset, max);
+                let indicator_len = indicator.len() as u16;
+                if indicator_len < content_area.width {
+                    let x = content_area.x + content_area.width - indicator_len;
+                    let y = content_area.y;
+                    let indicator_style = Style::default()
+                        .bg(RatColor::Yellow)
+                        .fg(RatColor::Black)
+                        .add_modifier(Modifier::BOLD);
+                    let indicator_span = Span::styled(indicator, indicator_style);
+                    let indicator_area = Rect::new(x, y, indicator_len, 1);
+                    frame.render_widget(Paragraph::new(vec![Line::from(indicator_span)]), indicator_area);
+                }
+            }
+
             // Set cursor position -- only if visible
             if cursor_visible
                 && let Some(cursor) = cursor_opt
@@ -180,7 +200,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 60, 20);
-                render(frame, area, None, None, true, None, true);
+                render(frame, area, None, None, true, None, true, None);
             })
             .unwrap();
 
@@ -207,7 +227,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 60, 20);
-                render(frame, area, None, None, true, Some("/home/user/project"), true);
+                render(frame, area, None, None, true, Some("/home/user/project"), true, None);
             })
             .unwrap();
 
@@ -238,7 +258,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true);
+                render(frame, area, Some(&cells), None, true, None, true, None);
             })
             .unwrap();
 
@@ -261,7 +281,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true);
+                render(frame, area, Some(&cells), None, true, None, true, None);
             })
             .unwrap();
 
@@ -285,7 +305,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true);
+                render(frame, area, Some(&cells), None, true, None, true, None);
             })
             .unwrap();
 
@@ -314,7 +334,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 5, 4);
-                render(frame, area, Some(&cells), None, true, None, true);
+                render(frame, area, Some(&cells), None, true, None, true, None);
             })
             .unwrap();
 
@@ -334,7 +354,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, None, None, true, None, true);
+                render(frame, area, None, None, true, None, true, None);
             })
             .unwrap();
 
@@ -351,7 +371,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, None, None, true, Some("/tmp"), true);
+                render(frame, area, None, None, true, Some("/tmp"), true, None);
             })
             .unwrap();
 
@@ -368,7 +388,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, None, None, true, Some("/tmp"), false);
+                render(frame, area, None, None, true, Some("/tmp"), false, None);
             })
             .unwrap();
 
@@ -392,7 +412,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true);
+                render(frame, area, Some(&cells), None, true, None, true, None);
             })
             .unwrap();
 
@@ -414,7 +434,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true);
+                render(frame, area, Some(&cells), None, true, None, true, None);
             })
             .unwrap();
 
@@ -436,7 +456,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true);
+                render(frame, area, Some(&cells), None, true, None, true, None);
             })
             .unwrap();
 
@@ -460,7 +480,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true);
+                render(frame, area, Some(&cells), None, true, None, true, None);
             })
             .unwrap();
 
@@ -486,7 +506,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true);
+                render(frame, area, Some(&cells), None, true, None, true, None);
             })
             .unwrap();
 
@@ -514,7 +534,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true);
+                render(frame, area, Some(&cells), None, true, None, true, None);
             })
             .unwrap();
 
@@ -540,7 +560,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, Some(&cells), Some(cursor), true, None, true);
+                render(frame, area, Some(&cells), Some(cursor), true, None, true, None);
             })
             .unwrap();
 
@@ -573,7 +593,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, Some(&cells), Some(cursor), true, None, true);
+                render(frame, area, Some(&cells), Some(cursor), true, None, true, None);
             })
             .unwrap();
 
@@ -603,7 +623,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 5, 4);
-                render(frame, area, Some(&cells), None, true, None, true);
+                render(frame, area, Some(&cells), None, true, None, true, None);
             })
             .unwrap();
 
@@ -637,7 +657,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, Some(&cells), Some(cursor), true, None, true);
+                render(frame, area, Some(&cells), Some(cursor), true, None, true, None);
             })
             .unwrap();
 
@@ -666,7 +686,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 3, 4);
-                render(frame, area, Some(&cells), None, true, None, true);
+                render(frame, area, Some(&cells), None, true, None, true, None);
             })
             .unwrap();
 
@@ -695,7 +715,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true);
+                render(frame, area, Some(&cells), None, true, None, true, None);
             })
             .unwrap();
 
@@ -722,7 +742,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true);
+                render(frame, area, Some(&cells), None, true, None, true, None);
             })
             .unwrap();
 
@@ -734,5 +754,115 @@ mod tests {
         assert_eq!(buf[(0, 1)].symbol(), "a");
         assert_eq!(buf[(1, 1)].symbol(), "あ");
         assert_eq!(buf[(3, 1)].symbol(), "b");
+    }
+
+    #[test]
+    fn render_scrollback_indicator_shows_offset_and_max() {
+        let backend = TestBackend::new(30, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 30, 5);
+                render(frame, area, Some(&cells), None, true, None, true, Some((42, 1000)));
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Indicator "[42/1000]" should appear at the top-right of content_area (row 1)
+        // content_area starts at row 1 (after CWD bar), width 30
+        // "[42/1000]" is 9 chars, so it starts at col 30-9 = 21
+        let indicator: String = (21..30)
+            .map(|x| buf[(x, 1)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert_eq!(indicator, "[42/1000]");
+        // Verify style: yellow bg, black fg, bold
+        assert_eq!(buf[(21, 1)].bg, RatColor::Yellow);
+        assert_eq!(buf[(21, 1)].fg, RatColor::Black);
+        assert!(buf[(21, 1)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn render_scrollback_indicator_hidden_when_offset_zero() {
+        let backend = TestBackend::new(30, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 30, 5);
+                render(frame, area, Some(&cells), None, true, None, true, Some((0, 1000)));
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Row 1 should NOT have yellow background anywhere
+        let has_yellow = (0..30).any(|x| buf[(x, 1)].bg == RatColor::Yellow);
+        assert!(!has_yellow, "Indicator should not appear when offset is 0");
+    }
+
+    #[test]
+    fn render_scrollback_indicator_hidden_when_none() {
+        let backend = TestBackend::new(30, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 30, 5);
+                render(frame, area, Some(&cells), None, true, None, true, None);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let has_yellow = (0..30).any(|x| buf[(x, 1)].bg == RatColor::Yellow);
+        assert!(!has_yellow, "Indicator should not appear when scrollback_info is None");
+    }
+
+    #[test]
+    fn render_scrollback_indicator_position_varies_with_digits() {
+        let backend = TestBackend::new(20, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 20, 5);
+                // "[5/50]" = 6 chars, starts at col 20-6 = 14
+                render(frame, area, Some(&cells), None, true, None, true, Some((5, 50)));
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let indicator: String = (14..20)
+            .map(|x| buf[(x, 1)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert_eq!(indicator, "[5/50]");
+    }
+
+    #[test]
+    fn render_scrollback_indicator_not_shown_when_too_wide() {
+        // Content area width = 3 (very narrow), indicator "[1/10]" = 6 chars > 3
+        let backend = TestBackend::new(3, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 3, 4);
+                render(frame, area, Some(&cells), None, true, None, true, Some((1, 10)));
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // No yellow background should appear since indicator doesn't fit
+        let has_yellow = (0..3).any(|x| buf[(x, 1)].bg == RatColor::Yellow);
+        assert!(!has_yellow, "Indicator should not appear when it doesn't fit");
     }
 }

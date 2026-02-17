@@ -189,6 +189,10 @@ impl<P: PtyPort, S: ScreenPort> TerminalUsecase<P, S> {
     pub fn screen_port(&self) -> &S {
         &self.screen_port
     }
+
+    pub fn screen_port_mut(&mut self) -> &mut S {
+        &mut self.screen_port
+    }
 }
 
 #[cfg(test)]
@@ -394,6 +398,22 @@ mod tests {
 
         fn drain_notifications(&mut self, id: TerminalId) -> Result<Vec<NotificationEvent>, AppError> {
             Ok(self.pending_notifications.remove(&id.value()).unwrap_or_default())
+        }
+
+        fn set_scrollback_offset(&mut self, _id: TerminalId, _offset: usize) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        fn get_scrollback_offset(&self, _id: TerminalId) -> Result<usize, AppError> {
+            Ok(0)
+        }
+
+        fn get_max_scrollback(&self, _id: TerminalId) -> Result<usize, AppError> {
+            Ok(0)
+        }
+
+        fn is_alternate_screen(&self, _id: TerminalId) -> Result<bool, AppError> {
+            Ok(false)
         }
     }
 

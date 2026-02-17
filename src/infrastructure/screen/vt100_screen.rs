@@ -69,6 +69,10 @@ struct Vt100Instance {
     parser: vt100::Parser<Vt100Callbacks>,
     /// Cache for `get_cells()` which must return `&Vec<Vec<Cell>>`.
     cached_cells: Vec<Vec<Cell>>,
+    /// Whether new output arrived while the user is scrolled back.
+    new_output_while_scrolled: bool,
+    /// Cached max scrollback value (updated in `&mut self` methods).
+    cached_max_scrollback: usize,
 }
 
 /// ScreenPort implementation backed by the `vt100` crate.
@@ -126,6 +130,13 @@ fn convert_cell(vt_cell: &vt100::Cell) -> Cell {
     }
 }
 
+fn update_max_scrollback(inst: &mut Vt100Instance) {
+    let current = inst.parser.screen().scrollback();
+    inst.parser.screen_mut().set_scrollback(usize::MAX);
+    inst.cached_max_scrollback = inst.parser.screen().scrollback();
+    inst.parser.screen_mut().set_scrollback(current);
+}
+
 fn rebuild_cell_cache(parser: &vt100::Parser<Vt100Callbacks>, cache: &mut Vec<Vec<Cell>>) {
     let screen = parser.screen();
     let rows = screen.size().0 as usize;
@@ -152,12 +163,14 @@ impl ScreenPort for Vt100ScreenAdapter {
     fn create(&mut self, id: TerminalId, size: TerminalSize) -> Result<(), AppError> {
         let callbacks = Vt100Callbacks::default();
         let parser =
-            vt100::Parser::new_with_callbacks(size.rows, size.cols, 0, callbacks);
+            vt100::Parser::new_with_callbacks(size.rows, size.cols, 10_000, callbacks);
         let mut cached_cells = Vec::new();
         rebuild_cell_cache(&parser, &mut cached_cells);
         self.instances.insert(id, Vt100Instance {
             parser,
             cached_cells,
+            new_output_while_scrolled: false,
+            cached_max_scrollback: 0,
         });
         Ok(())
     }
@@ -167,7 +180,12 @@ impl ScreenPort for Vt100ScreenAdapter {
             .instances
             .get_mut(&id)
             .ok_or(AppError::ScreenNotFound(id))?;
+        let was_scrolled = inst.parser.screen().scrollback() > 0;
         inst.parser.process(data);
+        if was_scrolled {
+            inst.new_output_while_scrolled = true;
+        }
+        update_max_scrollback(inst);
         rebuild_cell_cache(&inst.parser, &mut inst.cached_cells);
         Ok(())
     }
@@ -252,6 +270,40 @@ impl ScreenPort for Vt100ScreenAdapter {
             }
         }
         Ok(notifications)
+    }
+
+    fn set_scrollback_offset(&mut self, id: TerminalId, offset: usize) -> Result<(), AppError> {
+        let inst = self
+            .instances
+            .get_mut(&id)
+            .ok_or(AppError::ScreenNotFound(id))?;
+        inst.parser.screen_mut().set_scrollback(offset);
+        if offset == 0 {
+            inst.new_output_while_scrolled = false;
+        }
+        rebuild_cell_cache(&inst.parser, &mut inst.cached_cells);
+        Ok(())
+    }
+
+    fn get_scrollback_offset(&self, id: TerminalId) -> Result<usize, AppError> {
+        self.instances
+            .get(&id)
+            .map(|inst| inst.parser.screen().scrollback())
+            .ok_or(AppError::ScreenNotFound(id))
+    }
+
+    fn get_max_scrollback(&self, id: TerminalId) -> Result<usize, AppError> {
+        self.instances
+            .get(&id)
+            .map(|inst| inst.cached_max_scrollback)
+            .ok_or(AppError::ScreenNotFound(id))
+    }
+
+    fn is_alternate_screen(&self, id: TerminalId) -> Result<bool, AppError> {
+        self.instances
+            .get(&id)
+            .map(|inst| inst.parser.screen().alternate_screen())
+            .ok_or(AppError::ScreenNotFound(id))
     }
 }
 
@@ -1112,5 +1164,195 @@ mod tests {
                 message: "Msg".to_string()
             }
         );
+    }
+
+    // ─── Scrollback tests ───
+
+    #[test]
+    fn scrollback_offset_default_zero() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        assert_eq!(adapter.get_scrollback_offset(id(1)).unwrap(), 0);
+    }
+
+    #[test]
+    fn scrollback_max_zero_with_no_history() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        assert_eq!(adapter.get_max_scrollback(id(1)).unwrap(), 0);
+    }
+
+    #[test]
+    fn scrollback_max_grows_with_output() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let size = TerminalSize::new(80, 5);
+        adapter.create(id(1), size).unwrap();
+
+        // Fill 5-row screen + overflow to create scrollback
+        for i in 0..10 {
+            let line = format!("line {}\r\n", i);
+            adapter.process(id(1), line.as_bytes()).unwrap();
+        }
+
+        let max = adapter.get_max_scrollback(id(1)).unwrap();
+        assert!(max > 0, "Expected scrollback > 0, got {}", max);
+    }
+
+    #[test]
+    fn set_scrollback_offset_changes_view() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let size = TerminalSize::new(80, 5);
+        adapter.create(id(1), size).unwrap();
+
+        // Generate scrollback
+        for i in 0..20 {
+            let line = format!("line {}\r\n", i);
+            adapter.process(id(1), line.as_bytes()).unwrap();
+        }
+
+        let max = adapter.get_max_scrollback(id(1)).unwrap();
+        assert!(max > 0);
+
+        // Scroll back
+        adapter.set_scrollback_offset(id(1), 3).unwrap();
+        assert_eq!(adapter.get_scrollback_offset(id(1)).unwrap(), 3);
+
+        // Scroll back to live
+        adapter.set_scrollback_offset(id(1), 0).unwrap();
+        assert_eq!(adapter.get_scrollback_offset(id(1)).unwrap(), 0);
+    }
+
+    #[test]
+    fn set_scrollback_offset_clamped_to_max() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let size = TerminalSize::new(80, 5);
+        adapter.create(id(1), size).unwrap();
+
+        // Generate a few lines of scrollback
+        for i in 0..10 {
+            let line = format!("line {}\r\n", i);
+            adapter.process(id(1), line.as_bytes()).unwrap();
+        }
+
+        let max = adapter.get_max_scrollback(id(1)).unwrap();
+
+        // Set beyond max — vt100 should clamp
+        adapter.set_scrollback_offset(id(1), max + 100).unwrap();
+        let actual = adapter.get_scrollback_offset(id(1)).unwrap();
+        assert!(actual <= max, "Expected clamped to max={}, got {}", max, actual);
+    }
+
+    #[test]
+    fn scrollback_content_shows_history() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let size = TerminalSize::new(80, 3);
+        adapter.create(id(1), size).unwrap();
+
+        // Write enough lines to push "line 0" into scrollback
+        for i in 0..6 {
+            let line = format!("line {}\r\n", i);
+            adapter.process(id(1), line.as_bytes()).unwrap();
+        }
+
+        // Capture live view content as owned strings
+        let live_row0: String = adapter.get_cells(id(1)).unwrap()[0]
+            .iter().take(6).map(|c| c.ch).collect();
+
+        // Scroll to max
+        let max = adapter.get_max_scrollback(id(1)).unwrap();
+        assert!(max > 0);
+        adapter.set_scrollback_offset(id(1), max).unwrap();
+
+        let scrolled_row0: String = adapter.get_cells(id(1)).unwrap()[0]
+            .iter().take(6).map(|c| c.ch).collect();
+
+        // The scrolled view should show "line 0" (early content)
+        assert!(scrolled_row0.starts_with("line 0"), "Expected 'line 0' at scrollback top, got '{}'", scrolled_row0);
+        // Live and scrolled views should differ
+        assert_ne!(live_row0, scrolled_row0);
+    }
+
+    #[test]
+    fn alternate_screen_default_false() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        assert!(!adapter.is_alternate_screen(id(1)).unwrap());
+    }
+
+    #[test]
+    fn alternate_screen_true_after_switch() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"\x1b[?1049h").unwrap();
+        assert!(adapter.is_alternate_screen(id(1)).unwrap());
+    }
+
+    #[test]
+    fn alternate_screen_false_after_switch_back() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"\x1b[?1049h").unwrap();
+        adapter.process(id(1), b"\x1b[?1049l").unwrap();
+        assert!(!adapter.is_alternate_screen(id(1)).unwrap());
+    }
+
+    #[test]
+    fn new_output_while_scrolled_flag() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let size = TerminalSize::new(80, 5);
+        adapter.create(id(1), size).unwrap();
+
+        // Generate scrollback
+        for i in 0..10 {
+            let line = format!("line {}\r\n", i);
+            adapter.process(id(1), line.as_bytes()).unwrap();
+        }
+
+        // Scroll back
+        adapter.set_scrollback_offset(id(1), 3).unwrap();
+
+        // New output while scrolled
+        adapter.process(id(1), b"new data\r\n").unwrap();
+
+        // Flag should be set
+        let inst = adapter.instances.get(&id(1)).unwrap();
+        assert!(inst.new_output_while_scrolled);
+
+        // Reset scroll to 0 clears the flag
+        adapter.set_scrollback_offset(id(1), 0).unwrap();
+        let inst = adapter.instances.get(&id(1)).unwrap();
+        assert!(!inst.new_output_while_scrolled);
+    }
+
+    #[test]
+    fn scrollback_nonexistent_returns_error() {
+        let adapter = Vt100ScreenAdapter::new();
+        assert!(adapter.get_scrollback_offset(id(99)).is_err());
+        assert!(adapter.get_max_scrollback(id(99)).is_err());
+        assert!(adapter.is_alternate_screen(id(99)).is_err());
+    }
+
+    #[test]
+    fn set_scrollback_nonexistent_returns_error() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        assert!(adapter.set_scrollback_offset(id(99), 0).is_err());
+    }
+
+    #[test]
+    fn scrollback_independent_per_terminal() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let size = TerminalSize::new(80, 5);
+        adapter.create(id(1), size).unwrap();
+        adapter.create(id(2), size).unwrap();
+
+        // Generate scrollback for terminal 1 only
+        for i in 0..10 {
+            let line = format!("line {}\r\n", i);
+            adapter.process(id(1), line.as_bytes()).unwrap();
+        }
+
+        adapter.set_scrollback_offset(id(1), 3).unwrap();
+        assert_eq!(adapter.get_scrollback_offset(id(1)).unwrap(), 3);
+        assert_eq!(adapter.get_scrollback_offset(id(2)).unwrap(), 0);
     }
 }

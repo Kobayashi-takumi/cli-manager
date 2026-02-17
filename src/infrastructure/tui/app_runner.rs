@@ -50,6 +50,7 @@ pub fn run<P: PtyPort, S: ScreenPort>(mut controller: TuiController<P, S>) -> an
     let mut focus = FocusPane::Terminal;
     let mut sidebar_scroll_offset: usize = 0;
     let mut notifier = MacOsNotifier::new();
+    let mut in_scrollback = false;
 
     // === Main loop ===
     let result = main_loop(
@@ -61,6 +62,7 @@ pub fn run<P: PtyPort, S: ScreenPort>(mut controller: TuiController<P, S>) -> an
         &mut focus,
         &mut sidebar_scroll_offset,
         &mut notifier,
+        &mut in_scrollback,
     );
 
     // === Cleanup (always runs) ===
@@ -80,6 +82,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
     focus: &mut FocusPane,
     sidebar_scroll_offset: &mut usize,
     notifier: &mut MacOsNotifier,
+    in_scrollback: &mut bool,
 ) -> anyhow::Result<()> {
     while !*should_quit {
         // 1. Draw
@@ -114,7 +117,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
             );
 
             // Terminal view - get active terminal info
-            let (cells_opt, cursor_opt, cursor_visible, cwd_opt) =
+            let (cells_opt, cursor_opt, cursor_visible, cwd_opt, scrollback_info) =
                 match controller.usecase().get_active_terminal() {
                     Some(t) => {
                         let id = t.id();
@@ -124,14 +127,25 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                             .unwrap_or_else(|| t.cwd().display().to_string());
                         let cells = controller.usecase().screen_port().get_cells(id).ok();
                         let cursor = controller.usecase().screen_port().get_cursor(id).ok();
-                        let visible = controller
-                            .usecase()
-                            .screen_port()
-                            .get_cursor_visible(id)
-                            .unwrap_or(true);
-                        (cells, cursor, visible, Some(cwd))
+                        let visible = if *in_scrollback {
+                            false // Hide cursor during scrollback
+                        } else {
+                            controller
+                                .usecase()
+                                .screen_port()
+                                .get_cursor_visible(id)
+                                .unwrap_or(true)
+                        };
+                        let sb_info = if *in_scrollback {
+                            let offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                            let max = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                            Some((offset, max))
+                        } else {
+                            None
+                        };
+                        (cells, cursor, visible, Some(cwd), sb_info)
                     }
-                    None => (None, None, true, None),
+                    None => (None, None, true, None, None),
                 };
             terminal_view::render(
                 frame,
@@ -141,6 +155,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                 cursor_visible,
                 cwd_opt.as_deref(),
                 *focus == FocusPane::Terminal,
+                scrollback_info,
             );
 
             // Dialog overlay
@@ -212,7 +227,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
             let ev = event::read()?;
             match ev {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    handle_key_event(key, controller, input_handler, should_quit, dialog, focus, size)?;
+                    handle_key_event(key, controller, input_handler, should_quit, dialog, focus, size, in_scrollback)?;
                 }
                 Event::Resize(cols, rows) => {
                     let new_full = Rect::new(0, 0, cols, rows);
@@ -261,6 +276,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
     dialog: &mut DialogState,
     focus: &mut FocusPane,
     size: TerminalSize,
+    in_scrollback: &mut bool,
 ) -> anyhow::Result<()> {
     // If a dialog is active, handle keys in the dialog
     if !matches!(dialog, DialogState::None) {
@@ -293,13 +309,14 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
         .unwrap_or(false);
     input_handler.set_application_cursor_keys(app_cursor);
 
-    // Normal/PrefixWait mode
+    // Normal/PrefixWait/ScrollbackMode
     let Some(action) = input_handler.handle_key(key) else {
         return Ok(());
     };
 
     match action {
         AppAction::CreateTerminal { .. } => {
+            exit_scrollback_if_active(controller, input_handler, in_scrollback);
             *dialog = DialogState::CreateTerminal {
                 input: String::new(),
                 cursor_pos: 0,
@@ -307,6 +324,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             input_handler.set_mode(InputMode::DialogInput);
         }
         AppAction::CloseTerminal => {
+            exit_scrollback_if_active(controller, input_handler, in_scrollback);
             // Check if the active terminal is running
             if let Some(terminal) = controller.usecase().get_active_terminal() {
                 if terminal.status().is_running() {
@@ -325,10 +343,97 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             *should_quit = true;
         }
         AppAction::ToggleFocus => {
+            exit_scrollback_if_active(controller, input_handler, in_scrollback);
             *focus = match *focus {
                 FocusPane::Sidebar => FocusPane::Terminal,
                 FocusPane::Terminal => FocusPane::Sidebar,
             };
+        }
+        AppAction::SelectNext | AppAction::SelectPrev | AppAction::SelectByIndex(_) => {
+            exit_scrollback_if_active(controller, input_handler, in_scrollback);
+            match controller.dispatch(action, size) {
+                Ok(()) => {}
+                Err(e) => {
+                    if !matches!(e, crate::shared::error::AppError::NoActiveTerminal) {
+                        return Err(e.into());
+                    }
+                }
+            }
+        }
+        AppAction::EnterScrollback => {
+            // Check if we can enter scrollback (not in alternate screen, has history)
+            if let Some(t) = controller.usecase().get_active_terminal() {
+                let id = t.id();
+                let is_alt = controller.usecase().screen_port().is_alternate_screen(id).unwrap_or(false);
+                let max = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                if !is_alt && max > 0 {
+                    *in_scrollback = true;
+                    input_handler.set_mode(InputMode::ScrollbackMode);
+                }
+            }
+        }
+        AppAction::ExitScrollback => {
+            exit_scrollback_if_active(controller, input_handler, in_scrollback);
+        }
+        AppAction::ScrollbackUp(n) => {
+            if let Some(t) = controller.usecase().get_active_terminal() {
+                let id = t.id();
+                let current = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                let max = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                let new_offset = (current + n).min(max);
+                let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset);
+            }
+        }
+        AppAction::ScrollbackDown(n) => {
+            if let Some(t) = controller.usecase().get_active_terminal() {
+                let id = t.id();
+                let current = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                let new_offset = current.saturating_sub(n);
+                let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset);
+                if new_offset == 0 {
+                    // Auto-exit scrollback when reaching bottom
+                    *in_scrollback = false;
+                    input_handler.set_mode(InputMode::Normal);
+                }
+            }
+        }
+        AppAction::ScrollbackPageUp => {
+            if let Some(t) = controller.usecase().get_active_terminal() {
+                let id = t.id();
+                let current = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                let max = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                let page = (size.rows as usize) / 2;
+                let new_offset = (current + page).min(max);
+                let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset);
+            }
+        }
+        AppAction::ScrollbackPageDown => {
+            if let Some(t) = controller.usecase().get_active_terminal() {
+                let id = t.id();
+                let current = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                let page = (size.rows as usize) / 2;
+                let new_offset = current.saturating_sub(page);
+                let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset);
+                if new_offset == 0 {
+                    *in_scrollback = false;
+                    input_handler.set_mode(InputMode::Normal);
+                }
+            }
+        }
+        AppAction::ScrollbackTop => {
+            if let Some(t) = controller.usecase().get_active_terminal() {
+                let id = t.id();
+                let max = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, max);
+            }
+        }
+        AppAction::ScrollbackBottom => {
+            if let Some(t) = controller.usecase().get_active_terminal() {
+                let id = t.id();
+                let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, 0);
+            }
+            *in_scrollback = false;
+            input_handler.set_mode(InputMode::Normal);
         }
         other => {
             match controller.dispatch(other, size) {
@@ -344,6 +449,22 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
     }
 
     Ok(())
+}
+
+/// Exit scrollback mode and reset offset to 0 if currently in scrollback.
+fn exit_scrollback_if_active<P: PtyPort, S: ScreenPort>(
+    controller: &mut TuiController<P, S>,
+    input_handler: &mut InputHandler,
+    in_scrollback: &mut bool,
+) {
+    if *in_scrollback {
+        if let Some(t) = controller.usecase().get_active_terminal() {
+            let id = t.id();
+            let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, 0);
+        }
+        *in_scrollback = false;
+        input_handler.set_mode(InputMode::Normal);
+    }
 }
 
 fn handle_dialog_key<P: PtyPort, S: ScreenPort>(

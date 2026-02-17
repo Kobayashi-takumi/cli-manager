@@ -40,4 +40,18 @@ pub trait ScreenPort: Send + Sync {
     /// Drain and return all pending notification events for the specified terminal.
     /// After calling this method, the internal notification queue is cleared.
     fn drain_notifications(&mut self, id: TerminalId) -> Result<Vec<NotificationEvent>, AppError>;
+
+    /// Set the scrollback offset for the specified terminal.
+    /// 0 = live view (bottom), larger values = further into history.
+    fn set_scrollback_offset(&mut self, id: TerminalId, offset: usize) -> Result<(), AppError>;
+
+    /// Get the current scrollback offset for the specified terminal.
+    /// 0 = live view (bottom).
+    fn get_scrollback_offset(&self, id: TerminalId) -> Result<usize, AppError>;
+
+    /// Get the maximum scrollback offset (total scrollback lines available).
+    fn get_max_scrollback(&self, id: TerminalId) -> Result<usize, AppError>;
+
+    /// Check whether the terminal is currently in alternate screen mode.
+    fn is_alternate_screen(&self, id: TerminalId) -> Result<bool, AppError>;
 }

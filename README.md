@@ -41,6 +41,7 @@ TUI ベースのターミナルマルチプレクサ。複数の CLI プロセ�
 | ブラケットペースト | ペースト時のエスケープシーケンスラッピング |
 | OSC 7 動的 CWD | シェルの現在ディレクトリをサイドバーに反映 |
 | 通知 | BEL / OSC 9 / OSC 777 検出 → サイドバーマーク + macOS デスクトップ通知 |
+| スクロールバック | 出力履歴を vim ライクなキーバインドでスクロール閲覧（10,000 行バッファ） |
 
 ## 必要環境
 
@@ -91,8 +92,23 @@ cargo run
 | `Ctrl+b` → `p` | 前のターミナルを選択 |
 | `Ctrl+b` → `1`〜`9` | 番号指定でターミナルをジャンプ |
 | `Ctrl+b` → `Ctrl+b` | 子プロセスに `Ctrl+b` を送信 |
+| `Ctrl+b` → `[` | スクロールバックモードに入る |
 | `Ctrl+b` → `q` | アプリケーション終了 |
 | その他のキー | アクティブターミナルの stdin へパススルー |
+
+#### スクロールバックモード
+
+`Ctrl+b` → `[` でスクロールバックモードに入ると、出力履歴を遡って閲覧できます。vim ライクなキーバインドで操作します。
+
+| キーバインド | アクション |
+|---|---|
+| `↑` / `k` | 1 行上にスクロール |
+| `↓` / `j` | 1 行下にスクロール |
+| `PageUp` | 1 ページ上にスクロール |
+| `PageDown` | 1 ページ下にスクロール |
+| `g` | バッファの先頭にジャンプ |
+| `G` | バッファの末尾にジャンプ |
+| `Esc` / `q` | スクロールバックモードを終了 |
 
 ### プレフィックスキーの仕組み
 
@@ -103,8 +119,10 @@ stateDiagram-v2
     [*] --> Normal
     Normal --> PrefixWait : Ctrl+b 押下
     PrefixWait --> Normal : コマンドキー入力\n(c/d/n/p/1-9/q)
+    PrefixWait --> ScrollbackMode : [ 押下
     PrefixWait --> Normal : 1秒タイムアウト\n(Ctrl+b を子プロセスへ送信)
     PrefixWait --> Normal : Ctrl+b 再押下\n(Ctrl+b を子プロセスへ送信)
+    ScrollbackMode --> Normal : Esc / q 押下
 ```
 
 **ポイント:**
@@ -387,7 +405,7 @@ cargo check
 # ビルド
 cargo build
 
-# テスト（全 516 件）
+# テスト（全 553 件）
 cargo test
 
 # 特定のテストのみ実行
@@ -399,36 +417,36 @@ cargo clippy
 
 ### テスト構成
 
-合計 **516** ユニットテスト。各モジュールごとの内訳は以下の通りです。
+合計 **553** ユニットテスト。各モジュールごとの内訳は以下の通りです。
 
 ```mermaid
-pie title ユニットテスト構成 (516件)
-    "VteScreenAdapter (173)" : 173
-    "Vt100ScreenAdapter (72)" : 72
-    "InputHandler (64)" : 64
-    "TerminalUsecase (52)" : 52
+pie title ユニットテスト構成 (553件)
+    "VteScreenAdapter (176)" : 176
+    "Vt100ScreenAdapter (85)" : 85
+    "InputHandler (79)" : 79
+    "TerminalUsecase (50)" : 50
     "Sidebar (29)" : 29
-    "TuiController (28)" : 28
-    "TerminalView (25)" : 25
-    "MacOsNotifier (17)" : 17
+    "TerminalView (30)" : 30
+    "TuiController (27)" : 27
+    "MacOsNotifier (16)" : 16
     "NotificationEvent (15)" : 15
-    "その他 (41)" : 41
+    "その他 (46)" : 46
 ```
 
 | モジュール | テスト数 | テスト対象 |
 |-----------|---------|-----------|
-| `VteScreenAdapter` | 173 | ANSI パース、セルグリッド、カーソル移動、代替画面、スクロールリージョン、ワイド文字、OSC タイトル、通知 |
-| `Vt100ScreenAdapter` | 72 | vt100 ベースパース、セル属性、OSC 7 CWD、OSC タイトル、通知 |
-| `InputHandler` | 64 | ステートマシン、プレフィックスキー、タイムアウト、アプリケーションカーソルキー、ブラケットペースト |
-| `TerminalUsecase` | 52 | CRUD 操作、ポーリング、通知収集、エラーハンドリング |
+| `VteScreenAdapter` | 176 | ANSI パース、セルグリッド、カーソル移動、代替画面、スクロールリージョン、ワイド文字、OSC タイトル、通知 |
+| `Vt100ScreenAdapter` | 85 | vt100 ベースパース、セル属性、OSC 7 CWD、OSC タイトル、通知、スクロールバック |
+| `InputHandler` | 79 | ステートマシン、プレフィックスキー、タイムアウト、アプリケーションカーソルキー、ブラケットペースト、スクロールバックモード |
+| `TerminalUsecase` | 50 | CRUD 操作、ポーリング、通知収集、エラーハンドリング |
 | `Sidebar` | 29 | ターミナル一覧描画、動的 CWD 表示、通知マーク |
-| `TuiController` | 28 | AppAction ディスパッチ、状態管理 |
-| `TerminalView` | 25 | 出力表示、ワイド文字クリッピング、カーソル位置 |
-| `MacOsNotifier` | 17 | デスクトップ通知送信、レート制限 |
+| `TerminalView` | 30 | 出力表示、ワイド文字クリッピング、カーソル位置、スクロールバック表示 |
+| `TuiController` | 27 | AppAction ディスパッチ、状態管理 |
+| `MacOsNotifier` | 16 | デスクトップ通知送信、レート制限 |
 | `NotificationEvent` | 15 | Bell/Osc9/Osc777 イベント |
 | `Dialog` | 10 | 確認ダイアログ描画 |
 | `OSC 7 Parser` | 10 | URI パース、パーセントデコード |
-| `ManagedTerminal` | 10 | エンティティ操作、通知フラグ |
+| `ManagedTerminal` | 9 | エンティティ操作、通知フラグ |
 | `Layout` | 6 | 2ペインレイアウト計算 |
 | `Cell` | 5 | セル属性、色 |
 

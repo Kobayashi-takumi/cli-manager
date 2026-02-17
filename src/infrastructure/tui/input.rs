@@ -16,6 +16,7 @@ pub enum InputMode {
     Normal,
     PrefixWait(Instant),
     DialogInput,
+    ScrollbackMode,
 }
 
 /// Converts crossterm `KeyEvent`s into `AppAction`s using a prefix-key state
@@ -68,6 +69,7 @@ impl InputHandler {
             InputMode::Normal => self.handle_normal(key),
             InputMode::PrefixWait(_) => self.handle_prefix(key),
             InputMode::DialogInput => None,
+            InputMode::ScrollbackMode => self.handle_scrollback(key),
         }
     }
 
@@ -106,6 +108,22 @@ impl InputHandler {
         }
     }
 
+    fn handle_scrollback(&mut self, key: KeyEvent) -> Option<AppAction> {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => Some(AppAction::ScrollbackUp(1)),
+            KeyCode::Down | KeyCode::Char('j') => Some(AppAction::ScrollbackDown(1)),
+            KeyCode::PageUp => Some(AppAction::ScrollbackPageUp),
+            KeyCode::PageDown => Some(AppAction::ScrollbackPageDown),
+            KeyCode::Char('g') => Some(AppAction::ScrollbackTop),
+            KeyCode::Char('G') => Some(AppAction::ScrollbackBottom),
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = InputMode::Normal;
+                Some(AppAction::ExitScrollback)
+            }
+            _ => None, // Ignore other keys in scrollback mode
+        }
+    }
+
     fn handle_prefix(&mut self, key: KeyEvent) -> Option<AppAction> {
         self.mode = InputMode::Normal; // Always return to Normal
 
@@ -121,6 +139,7 @@ impl InputHandler {
             }
             KeyCode::Char('q') if key.modifiers.is_empty() => Some(AppAction::Quit),
             KeyCode::Char('o') if key.modifiers.is_empty() => Some(AppAction::ToggleFocus),
+            KeyCode::Char('[') if key.modifiers.is_empty() => Some(AppAction::EnterScrollback),
             // Ctrl+b again -> send literal Ctrl+b to child process
             KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(AppAction::WriteToActive(vec![0x02]))
@@ -1052,5 +1071,194 @@ mod tests {
         handler.set_application_cursor_keys(false);
         let action = handler.handle_key(key);
         assert!(matches!(action, Some(AppAction::WriteToActive(ref b)) if b == &[0x1B, b'[', b'A']));
+    }
+
+    // =========================================================================
+    // Tests: Scrollback mode
+    // =========================================================================
+
+    /// Assert that the handler is in ScrollbackMode.
+    fn assert_scrollback_mode(handler: &InputHandler) {
+        assert!(
+            matches!(handler.mode(), InputMode::ScrollbackMode),
+            "expected InputMode::ScrollbackMode"
+        );
+    }
+
+    /// Helper: put the handler into ScrollbackMode
+    fn enter_scrollback(handler: &mut InputHandler) {
+        handler.set_mode(InputMode::ScrollbackMode);
+        assert_scrollback_mode(handler);
+    }
+
+    #[test]
+    fn prefix_bracket_enters_scrollback() {
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        let key = make_key(KeyCode::Char('['), KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+
+        assert!(matches!(action, Some(AppAction::EnterScrollback)));
+        assert_normal(&handler); // prefix always returns to normal; app_runner sets ScrollbackMode
+    }
+
+    #[test]
+    fn scrollback_up_arrow() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Up, KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ScrollbackUp(1))));
+        assert_scrollback_mode(&handler);
+    }
+
+    #[test]
+    fn scrollback_down_arrow() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ScrollbackDown(1))));
+        assert_scrollback_mode(&handler);
+    }
+
+    #[test]
+    fn scrollback_k_key_scrolls_up() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ScrollbackUp(1))));
+        assert_scrollback_mode(&handler);
+    }
+
+    #[test]
+    fn scrollback_j_key_scrolls_down() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ScrollbackDown(1))));
+        assert_scrollback_mode(&handler);
+    }
+
+    #[test]
+    fn scrollback_page_up() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ScrollbackPageUp)));
+        assert_scrollback_mode(&handler);
+    }
+
+    #[test]
+    fn scrollback_page_down() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::PageDown, KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ScrollbackPageDown)));
+        assert_scrollback_mode(&handler);
+    }
+
+    #[test]
+    fn scrollback_g_goes_to_top() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ScrollbackTop)));
+        assert_scrollback_mode(&handler);
+    }
+
+    #[test]
+    fn scrollback_big_g_goes_to_bottom() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('G'), KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ScrollbackBottom)));
+        assert_scrollback_mode(&handler);
+    }
+
+    #[test]
+    fn scrollback_esc_exits() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ExitScrollback)));
+        assert_normal(&handler);
+    }
+
+    #[test]
+    fn scrollback_q_exits() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ExitScrollback)));
+        assert_normal(&handler);
+    }
+
+    #[test]
+    fn scrollback_unknown_key_returns_none() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_scrollback_mode(&handler);
+    }
+
+    #[test]
+    fn scrollback_ctrl_b_ignored() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(action.is_none());
+        assert_scrollback_mode(&handler);
+    }
+
+    #[test]
+    fn scrollback_enter_ignored() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_scrollback_mode(&handler);
+    }
+
+    #[test]
+    fn scrollback_full_flow_enter_navigate_exit() {
+        let mut handler = InputHandler::new();
+
+        // Ctrl+b → [ → EnterScrollback
+        enter_prefix(&mut handler);
+        let action = handler.handle_key(make_key(KeyCode::Char('['), KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::EnterScrollback)));
+
+        // Simulate app_runner setting ScrollbackMode
+        handler.set_mode(InputMode::ScrollbackMode);
+
+        // Navigate
+        let action = handler.handle_key(make_key(KeyCode::Up, KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ScrollbackUp(1))));
+
+        let action = handler.handle_key(make_key(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ScrollbackPageUp)));
+
+        // Exit
+        let action = handler.handle_key(make_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ExitScrollback)));
+        assert_normal(&handler);
+
+        // Normal mode works again
+        let action = handler.handle_key(make_key(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::WriteToActive(ref b)) if b == &[b'a']));
     }
 }

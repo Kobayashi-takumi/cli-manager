@@ -18,6 +18,14 @@ pub enum AppAction {
     PollAll,
     Quit,
     ToggleFocus,
+    EnterScrollback,
+    ExitScrollback,
+    ScrollbackUp(usize),
+    ScrollbackDown(usize),
+    ScrollbackPageUp,
+    ScrollbackPageDown,
+    ScrollbackTop,
+    ScrollbackBottom,
 }
 
 /// Thin controller that translates `AppAction`s into usecase calls.
@@ -64,6 +72,14 @@ impl<P: PtyPort, S: ScreenPort> TuiController<P, S> {
             }
             AppAction::Quit => {}          // Handled by caller (should_quit flag)
             AppAction::ToggleFocus => {}   // Handled by caller (focus state)
+            AppAction::EnterScrollback
+            | AppAction::ExitScrollback
+            | AppAction::ScrollbackUp(_)
+            | AppAction::ScrollbackDown(_)
+            | AppAction::ScrollbackPageUp
+            | AppAction::ScrollbackPageDown
+            | AppAction::ScrollbackTop
+            | AppAction::ScrollbackBottom => {} // Handled by caller (app_runner)
         }
         Ok(())
     }
@@ -248,6 +264,22 @@ mod tests {
 
         fn drain_notifications(&mut self, _id: TerminalId) -> Result<Vec<NotificationEvent>, AppError> {
             Ok(vec![])
+        }
+
+        fn set_scrollback_offset(&mut self, _id: TerminalId, _offset: usize) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        fn get_scrollback_offset(&self, _id: TerminalId) -> Result<usize, AppError> {
+            Ok(0)
+        }
+
+        fn get_max_scrollback(&self, _id: TerminalId) -> Result<usize, AppError> {
+            Ok(0)
+        }
+
+        fn is_alternate_screen(&self, _id: TerminalId) -> Result<bool, AppError> {
+            Ok(false)
         }
     }
 
