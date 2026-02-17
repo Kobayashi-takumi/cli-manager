@@ -173,7 +173,7 @@ pub fn render(
     // Help hints (always visible in fixed area)
     let help_lines = vec![
         Line::from(Span::styled(
-            "^t c:New d:Del o:Pane q:Quit",
+            "^b c:New d:Del o:Pane q:Quit",
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
@@ -307,7 +307,7 @@ mod tests {
         // Last two rows inside the block border (row 18 and 17, since row 19 is bottom border)
         let help_row1: String = (0..30).map(|x| buf[(x, 17)].symbol().chars().next().unwrap_or(' ')).collect();
         let help_row2: String = (0..30).map(|x| buf[(x, 18)].symbol().chars().next().unwrap_or(' ')).collect();
-        assert!(help_row1.contains("^t c:New"), "Expected help hint in row17, got: {}", help_row1);
+        assert!(help_row1.contains("^b c:New"), "Expected help hint in row17, got: {}", help_row1);
         assert!(help_row2.contains("Sel"), "Expected help hint in row18, got: {}", help_row2);
     }
 
@@ -505,7 +505,7 @@ mod tests {
             .map(|x| buf[(x, 10)].symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(
-            help_row1.contains("^t c:New"),
+            help_row1.contains("^b c:New"),
             "Expected help hint when scrolling, got: {}",
             help_row1
         );

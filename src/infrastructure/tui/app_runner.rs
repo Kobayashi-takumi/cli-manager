@@ -283,7 +283,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                 *focus = FocusPane::Terminal;
                 return Ok(());
             }
-            _ => {} // Fall through to InputHandler (Ctrl+t etc.)
+            _ => {} // Fall through to InputHandler (Ctrl+b etc.)
         }
     }
 

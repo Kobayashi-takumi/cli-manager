@@ -801,7 +801,7 @@ flowchart TD
 ```mermaid
 stateDiagram-v2
     [*] --> Normal
-    Normal --> PrefixWait: Ctrl+t 入力
+    Normal --> PrefixWait: Ctrl+b 入力
     Normal --> Normal: Other → AppAction::WriteToActive
 
     PrefixWait --> Normal: 'c' → AppAction::CreateTerminal
@@ -809,8 +809,8 @@ stateDiagram-v2
     PrefixWait --> Normal: 'n' → AppAction::SelectNext
     PrefixWait --> Normal: 'p' → AppAction::SelectPrev
     PrefixWait --> Normal: '1'-'9' → AppAction::SelectByIndex
-    PrefixWait --> Normal: Ctrl+t → AppAction::WriteToActive(Ctrl+t)
-    PrefixWait --> Normal: Timeout(1s) → AppAction::WriteToActive(Ctrl+t)
+    PrefixWait --> Normal: Ctrl+b → AppAction::WriteToActive(Ctrl+b)
+    PrefixWait --> Normal: Timeout(1s) → AppAction::WriteToActive(Ctrl+b)
     PrefixWait --> Normal: Other → cancel (no action)
 ```
 
@@ -846,7 +846,7 @@ impl InputHandler {
         if let InputMode::PrefixWait(since) = &self.mode {
             if since.elapsed().as_millis() > 1000 {
                 self.mode = InputMode::Normal;
-                return Some(AppAction::WriteToActive(vec![0x14])); // Ctrl+t
+                return Some(AppAction::WriteToActive(vec![0x02])); // Ctrl+b
             }
         }
         None

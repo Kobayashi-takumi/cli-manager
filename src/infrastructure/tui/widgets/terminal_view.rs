@@ -47,7 +47,7 @@ pub fn render(
     match cells_opt {
         None => {
             // No terminal selected
-            let msg = "No terminal. Press ^t c to create.";
+            let msg = "No terminal. Press ^b c to create.";
             // Center the message
             let x = content_area.x + content_area.width.saturating_sub(msg.len() as u16) / 2;
             let y = content_area.y + content_area.height / 2;

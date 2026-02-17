@@ -46,7 +46,7 @@ Clean Architecture with strict dependency direction: `infrastructure → interfa
 
 - **Ports in `interface_adapter/port/`**: `PtyPort` and `ScreenPort` traits define the boundary between usecase and infrastructure. Usecase depends only on these traits via generics.
 - **DI in `main.rs`**: Concrete adapters are assembled and injected at the entry point.
-- **Prefix key model**: `Ctrl+t` is the prefix key (like tmux). `InputHandler` manages `Normal → PrefixWait → Normal` state machine with 1-second timeout.
+- **Prefix key model**: `Ctrl+b` is the prefix key (like tmux). `InputHandler` manages `Normal → PrefixWait → Normal` state machine with 1-second timeout.
 - **Domain purity**: `domain/` and `usecase/` must never depend on external crates.
 
 ### Data Flow

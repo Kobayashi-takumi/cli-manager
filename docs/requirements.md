@@ -81,7 +81,7 @@ sequenceDiagram
     participant TM as Terminal Manager
     participant PTY as PTY Process
 
-    User->>TUI: Ctrl+t → c
+    User->>TUI: Ctrl+b → c
     TUI->>TUI: 名前入力プロンプト表示
     User->>TUI: 名前入力（省略可）
     TUI->>TM: create_terminal(name, cwd)
@@ -119,7 +119,7 @@ sequenceDiagram
     participant TM as Terminal Manager
     participant PTY as PTY Process
 
-    User->>TUI: Ctrl+t → d
+    User->>TUI: Ctrl+b → d
     TUI->>TM: get_terminal_status()
     alt プロセスが実行中
         TM-->>TUI: Running
@@ -143,7 +143,7 @@ sequenceDiagram
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Created: Ctrl+t → c
+    [*] --> Created: Ctrl+b → c
     Created --> Running: $SHELL 起動
 
     Running --> Exited: プロセス終了
@@ -207,16 +207,16 @@ stateDiagram-v2
 
 ## 5. キーバインド
 
-プレフィックス方式: `Ctrl+t` をプレフィックスキーとする。
+プレフィックス方式: `Ctrl+b` をプレフィックスキーとする。
 
 | キー | アクション |
 |------|-----------|
-| `Ctrl+t → c` | 新規ターミナル作成 |
-| `Ctrl+t → d` | 選択中のターミナルを閉じる |
-| `Ctrl+t → n` | 次のターミナルへ |
-| `Ctrl+t → p` | 前のターミナルへ |
-| `Ctrl+t → 1-9` | 番号指定でターミナル切り替え |
-| `Ctrl+t → Ctrl+t` | `Ctrl+t` を子プロセスに送信 |
+| `Ctrl+b → c` | 新規ターミナル作成 |
+| `Ctrl+b → d` | 選択中のターミナルを閉じる |
+| `Ctrl+b → n` | 次のターミナルへ |
+| `Ctrl+b → p` | 前のターミナルへ |
+| `Ctrl+b → 1-9` | 番号指定でターミナル切り替え |
+| `Ctrl+b → Ctrl+b` | `Ctrl+b` を子プロセスに送信 |
 | その他全キー入力 | アクティブなターミナルにそのまま送信 |
 
 ### 5.1 プレフィックスの挙動
@@ -224,14 +224,14 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
     [*] --> Normal
-    Normal --> PrefixWait: Ctrl+t 入力
+    Normal --> PrefixWait: Ctrl+b 入力
     PrefixWait --> Normal: c → 新規作成
     PrefixWait --> Normal: d → 削除
     PrefixWait --> Normal: n → 次へ
     PrefixWait --> Normal: p → 前へ
     PrefixWait --> Normal: 1-9 → 番号ジャンプ
-    PrefixWait --> Normal: Ctrl+t → Ctrl+t を子プロセスに送信
-    PrefixWait --> Normal: タイムアウト(1秒) → Ctrl+t を子プロセスに送信
+    PrefixWait --> Normal: Ctrl+b → Ctrl+b を子プロセスに送信
+    PrefixWait --> Normal: タイムアウト(1秒) → Ctrl+b を子プロセスに送信
 ```
 
 ---

@@ -7,7 +7,7 @@ use crate::interface_adapter::controller::tui_controller::AppAction;
 /// Represents the current mode of the input handler state machine.
 ///
 /// - `Normal`: all key presses are forwarded to the active terminal.
-/// - `PrefixWait(Instant)`: Ctrl+t was pressed; the handler waits for a
+/// - `PrefixWait(Instant)`: Ctrl+b was pressed; the handler waits for a
 ///   command key. The `Instant` records when we entered prefix mode so we
 ///   can detect a 1-second timeout.
 /// - `DialogInput`: a dialog is active; the input handler yields `None` and
@@ -21,7 +21,7 @@ pub enum InputMode {
 /// Converts crossterm `KeyEvent`s into `AppAction`s using a prefix-key state
 /// machine (similar to tmux's Ctrl+b).
 ///
-/// The prefix key is **Ctrl+t**. Pressing it transitions from `Normal` to
+/// The prefix key is **Ctrl+b**. Pressing it transitions from `Normal` to
 /// `PrefixWait`. A subsequent command key (e.g. `c`, `d`, `n`, `p`, `1`-`9`)
 /// produces the corresponding `AppAction` and transitions back to `Normal`.
 /// If no command key arrives within 1 second, or an unrecognised key is
@@ -74,14 +74,14 @@ impl InputHandler {
     /// Called on every tick to detect prefix-mode timeout.
     ///
     /// If the handler has been in `PrefixWait` for >= 1 second, it transitions
-    /// back to `Normal` and sends the literal Ctrl+t byte (`0x14`) to the
-    /// active terminal (so the user's delayed Ctrl+t is not silently lost).
+    /// back to `Normal` and sends the literal Ctrl+b byte (`0x02`) to the
+    /// active terminal (so the user's delayed Ctrl+b is not silently lost).
     pub fn check_timeout(&mut self) -> Option<AppAction> {
         if let InputMode::PrefixWait(since) = &self.mode
             && since.elapsed().as_millis() > 1000
         {
             self.mode = InputMode::Normal;
-            return Some(AppAction::WriteToActive(vec![0x14]));
+            return Some(AppAction::WriteToActive(vec![0x02]));
         }
         None
     }
@@ -91,8 +91,8 @@ impl InputHandler {
     // =========================================================================
 
     fn handle_normal(&mut self, key: KeyEvent) -> Option<AppAction> {
-        // Ctrl+t -> enter prefix mode
-        if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Ctrl+b -> enter prefix mode
+        if key.code == KeyCode::Char('b') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.mode = InputMode::PrefixWait(Instant::now());
             return None;
         }
@@ -121,9 +121,9 @@ impl InputHandler {
             }
             KeyCode::Char('q') if key.modifiers.is_empty() => Some(AppAction::Quit),
             KeyCode::Char('o') if key.modifiers.is_empty() => Some(AppAction::ToggleFocus),
-            // Ctrl+t again -> send literal Ctrl+t to child process
-            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Some(AppAction::WriteToActive(vec![0x14]))
+            // Ctrl+b again -> send literal Ctrl+b to child process
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(AppAction::WriteToActive(vec![0x02]))
             }
             _ => None, // Cancel - unrecognised prefix command
         }
@@ -284,9 +284,9 @@ mod tests {
     }
 
     #[test]
-    fn normal_ctrl_t_enters_prefix_wait() {
+    fn normal_ctrl_b_enters_prefix_wait() {
         let mut handler = InputHandler::new();
-        let key = make_key(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        let key = make_key(KeyCode::Char('b'), KeyModifiers::CONTROL);
 
         let action = handler.handle_key(key);
 
@@ -470,7 +470,7 @@ mod tests {
 
     /// Helper: put the handler into PrefixWait mode
     fn enter_prefix(handler: &mut InputHandler) {
-        let key = make_key(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        let key = make_key(KeyCode::Char('b'), KeyModifiers::CONTROL);
         let result = handler.handle_key(key);
         assert!(result.is_none());
         assert_prefix_wait(handler);
@@ -564,14 +564,14 @@ mod tests {
     }
 
     #[test]
-    fn prefix_ctrl_t_sends_literal_ctrl_t() {
+    fn prefix_ctrl_b_sends_literal_ctrl_b() {
         let mut handler = InputHandler::new();
         enter_prefix(&mut handler);
 
-        let key = make_key(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        let key = make_key(KeyCode::Char('b'), KeyModifiers::CONTROL);
         let action = handler.handle_key(key);
 
-        assert!(matches!(action, Some(AppAction::WriteToActive(ref b)) if b == &[0x14]));
+        assert!(matches!(action, Some(AppAction::WriteToActive(ref b)) if b == &[0x02]));
         assert_normal(&handler);
     }
 
@@ -664,11 +664,11 @@ mod tests {
     }
 
     #[test]
-    fn dialog_input_returns_none_for_ctrl_t() {
+    fn dialog_input_returns_none_for_ctrl_b() {
         let mut handler = InputHandler::new();
         handler.set_mode(InputMode::DialogInput);
 
-        let key = make_key(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        let key = make_key(KeyCode::Char('b'), KeyModifiers::CONTROL);
         let action = handler.handle_key(key);
 
         assert!(action.is_none());
@@ -840,8 +840,8 @@ mod tests {
         assert!(matches!(action, Some(AppAction::WriteToActive(ref b)) if b == &[b'h']));
         assert_normal(&handler);
 
-        // Ctrl+t enters prefix mode
-        let action = handler.handle_key(make_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        // Ctrl+b enters prefix mode
+        let action = handler.handle_key(make_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
         assert!(action.is_none());
         assert_prefix_wait(&handler);
 
@@ -877,15 +877,15 @@ mod tests {
     }
 
     #[test]
-    fn full_flow_double_ctrl_t_sends_literal() {
+    fn full_flow_double_ctrl_b_sends_literal() {
         let mut handler = InputHandler::new();
 
-        // First Ctrl+t enters prefix
+        // First Ctrl+b enters prefix
         enter_prefix(&mut handler);
 
-        // Second Ctrl+t sends literal 0x14
-        let action = handler.handle_key(make_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
-        assert!(matches!(action, Some(AppAction::WriteToActive(ref b)) if b == &[0x14]));
+        // Second Ctrl+b sends literal 0x02
+        let action = handler.handle_key(make_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(matches!(action, Some(AppAction::WriteToActive(ref b)) if b == &[0x02]));
         assert_normal(&handler);
     }
 
@@ -901,7 +901,7 @@ mod tests {
             .handle_key(make_key(KeyCode::Char('a'), KeyModifiers::NONE))
             .is_none());
         assert!(handler
-            .handle_key(make_key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .handle_key(make_key(KeyCode::Char('b'), KeyModifiers::CONTROL))
             .is_none());
 
         // Switch back to normal
