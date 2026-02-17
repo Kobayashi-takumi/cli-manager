@@ -1,0 +1,20 @@
+[package]
+name = "cli_manager"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "cm"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.30.0"
+crossterm = { version = "0.29.0", features = ["bracketed-paste"] }
+portable-pty = "0.9.0"
+vte = "0.15.0"
+thiserror = "2.0.18"
+anyhow = "1.0.101"
+libc = "0.2"
+unicode-width = "0.2"
+vt100 = "0.16"
+notify-rust = "4"
