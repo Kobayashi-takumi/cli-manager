@@ -82,7 +82,16 @@ pub fn render(
                         })
                         .map(|cell| {
                             let (fg, bg) = if cell.reverse {
-                                (to_ratatui_color(cell.bg), to_ratatui_color(cell.fg))
+                                let rfg = to_ratatui_color(cell.bg);
+                                let rbg = to_ratatui_color(cell.fg);
+                                // When both fg/bg are Default (Reset), reverse has no
+                                // visible effect. Substitute explicit White/Black so the
+                                // software cursor drawn by apps like Claude Code is visible.
+                                if rfg == RatColor::Reset && rbg == RatColor::Reset {
+                                    (RatColor::Black, RatColor::White)
+                                } else {
+                                    (rfg, rbg)
+                                }
                             } else {
                                 (to_ratatui_color(cell.fg), to_ratatui_color(cell.bg))
                             };
@@ -136,7 +145,9 @@ pub fn render(
                 }
             }
 
-            // Set cursor position -- only if visible
+            // Cursor rendering: show reverse-video block + hardware cursor when visible.
+            // When cursor_visible is false (DECTCEM off), the child process draws its own
+            // cursor via styled text, and the reported cursor position may be meaningless.
             if cursor_visible
                 && let Some(cursor) = cursor_opt
             {
@@ -155,6 +166,33 @@ pub fn render(
                 if cursor_x < content_area.x + content_area.width
                     && cursor_y < content_area.y + content_area.height
                 {
+                    // Render cursor cell with reverse video for visibility
+                    let cursor_ch = cells
+                        .get(cursor.row as usize)
+                        .and_then(|row| row.get(cursor.col as usize))
+                        .map(|c| if c.width != 0 { c.ch } else { ' ' })
+                        .unwrap_or(' ');
+                    let cursor_cell = cells
+                        .get(cursor.row as usize)
+                        .and_then(|row| row.get(cursor.col as usize));
+                    let cursor_style = if let Some(cell) = cursor_cell {
+                        let fg = to_ratatui_color(cell.fg);
+                        let bg = to_ratatui_color(cell.bg);
+                        let (cursor_fg, cursor_bg) = if fg == RatColor::Reset && bg == RatColor::Reset {
+                            (RatColor::Black, RatColor::White)
+                        } else if cell.reverse {
+                            (to_ratatui_color(cell.fg), to_ratatui_color(cell.bg))
+                        } else {
+                            (bg, fg)
+                        };
+                        Style::default().fg(cursor_fg).bg(cursor_bg)
+                    } else {
+                        Style::default().fg(RatColor::Black).bg(RatColor::White)
+                    };
+                    let cursor_span = Span::styled(cursor_ch.to_string(), cursor_style);
+                    let cursor_area = Rect::new(cursor_x, cursor_y, 1, 1);
+                    frame.render_widget(Paragraph::new(vec![Line::from(cursor_span)]), cursor_area);
+
                     frame.set_cursor_position((cursor_x, cursor_y));
                 }
             }
@@ -488,6 +526,33 @@ mod tests {
         // reverse should swap fg and bg
         assert_eq!(buf[(0, 1)].fg, RatColor::Indexed(4)); // was bg
         assert_eq!(buf[(0, 1)].bg, RatColor::Indexed(1)); // was fg
+    }
+
+    #[test]
+    fn render_cells_with_reverse_default_colors_uses_black_on_white() {
+        let backend = TestBackend::new(10, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // reverse with both fg/bg = Default: should render as Black on White
+        // (not Reset on Reset, which would be invisible)
+        let cells = vec![vec![Cell {
+            ch: ' ',
+            fg: Color::Default,
+            bg: Color::Default,
+            reverse: true,
+            ..Cell::default()
+        }]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 10, 5);
+                render(frame, area, Some(&cells), None, true, None, true, None);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(0, 1)].fg, RatColor::Black);
+        assert_eq!(buf[(0, 1)].bg, RatColor::White);
     }
 
     #[test]

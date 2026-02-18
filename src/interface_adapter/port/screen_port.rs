@@ -1,4 +1,4 @@
-use crate::domain::primitive::{Cell, CursorPos, NotificationEvent, TerminalId, TerminalSize};
+use crate::domain::primitive::{Cell, CursorPos, CursorStyle, NotificationEvent, TerminalId, TerminalSize};
 use crate::shared::error::AppError;
 
 /// Screen buffer operations port.
@@ -54,4 +54,7 @@ pub trait ScreenPort: Send + Sync {
 
     /// Check whether the terminal is currently in alternate screen mode.
     fn is_alternate_screen(&self, id: TerminalId) -> Result<bool, AppError>;
+
+    /// Get the current cursor style/shape (set by DECSCUSR: CSI Ps SP q).
+    fn get_cursor_style(&self, id: TerminalId) -> Result<CursorStyle, AppError>;
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::osc7::parse_osc7_uri;
-use crate::domain::primitive::{Cell, Color, CursorPos, NotificationEvent, TerminalId, TerminalSize};
+use crate::domain::primitive::{Cell, Color, CursorPos, CursorStyle, NotificationEvent, TerminalId, TerminalSize};
 use crate::interface_adapter::port::screen_port::ScreenPort;
 use crate::shared::error::AppError;
 
@@ -12,6 +12,7 @@ struct Vt100Callbacks {
     title: Option<String>,
     cwd: Option<String>,
     notifications: Vec<NotificationEvent>,
+    cursor_style: CursorStyle,
 }
 
 impl vt100::Callbacks for Vt100Callbacks {
@@ -25,6 +26,33 @@ impl vt100::Callbacks for Vt100Callbacks {
 
     fn set_window_icon_name(&mut self, _: &mut vt100::Screen, name: &[u8]) {
         self.title = Some(String::from_utf8_lossy(name).into_owned());
+    }
+
+    fn unhandled_csi(
+        &mut self,
+        _: &mut vt100::Screen,
+        i1: Option<u8>,
+        _i2: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        // DECSCUSR: CSI Ps SP q — Set Cursor Style
+        if c == 'q' && i1 == Some(b' ') {
+            let ps = params.first()
+                .and_then(|p| p.first())
+                .copied()
+                .unwrap_or(0);
+            self.cursor_style = match ps {
+                0 => CursorStyle::DefaultUserShape,
+                1 => CursorStyle::BlinkingBlock,
+                2 => CursorStyle::SteadyBlock,
+                3 => CursorStyle::BlinkingUnderScore,
+                4 => CursorStyle::SteadyUnderScore,
+                5 => CursorStyle::BlinkingBar,
+                6 => CursorStyle::SteadyBar,
+                _ => CursorStyle::DefaultUserShape,
+            };
+        }
     }
 
     fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
@@ -290,6 +318,13 @@ impl ScreenPort for Vt100ScreenAdapter {
         self.instances
             .get(&id)
             .map(|inst| inst.parser.screen().alternate_screen())
+            .ok_or(AppError::ScreenNotFound(id))
+    }
+
+    fn get_cursor_style(&self, id: TerminalId) -> Result<CursorStyle, AppError> {
+        self.instances
+            .get(&id)
+            .map(|inst| inst.parser.callbacks().cursor_style)
             .ok_or(AppError::ScreenNotFound(id))
     }
 }
@@ -1341,5 +1376,101 @@ mod tests {
         adapter.set_scrollback_offset(id(1), 3).unwrap();
         assert_eq!(adapter.get_scrollback_offset(id(1)).unwrap(), 3);
         assert_eq!(adapter.get_scrollback_offset(id(2)).unwrap(), 0);
+    }
+
+    // ─── Cursor style (DECSCUSR) tests ───
+
+    #[test]
+    fn cursor_style_default() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        assert_eq!(adapter.get_cursor_style(id(1)).unwrap(), CursorStyle::DefaultUserShape);
+    }
+
+    #[test]
+    fn cursor_style_blinking_block() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        // DECSCUSR: CSI 1 SP q
+        adapter.process(id(1), b"\x1b[1 q").unwrap();
+        assert_eq!(adapter.get_cursor_style(id(1)).unwrap(), CursorStyle::BlinkingBlock);
+    }
+
+    #[test]
+    fn cursor_style_steady_block() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"\x1b[2 q").unwrap();
+        assert_eq!(adapter.get_cursor_style(id(1)).unwrap(), CursorStyle::SteadyBlock);
+    }
+
+    #[test]
+    fn cursor_style_blinking_underline() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"\x1b[3 q").unwrap();
+        assert_eq!(adapter.get_cursor_style(id(1)).unwrap(), CursorStyle::BlinkingUnderScore);
+    }
+
+    #[test]
+    fn cursor_style_steady_underline() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"\x1b[4 q").unwrap();
+        assert_eq!(adapter.get_cursor_style(id(1)).unwrap(), CursorStyle::SteadyUnderScore);
+    }
+
+    #[test]
+    fn cursor_style_blinking_bar() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"\x1b[5 q").unwrap();
+        assert_eq!(adapter.get_cursor_style(id(1)).unwrap(), CursorStyle::BlinkingBar);
+    }
+
+    #[test]
+    fn cursor_style_steady_bar() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"\x1b[6 q").unwrap();
+        assert_eq!(adapter.get_cursor_style(id(1)).unwrap(), CursorStyle::SteadyBar);
+    }
+
+    #[test]
+    fn cursor_style_reset_to_default() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"\x1b[5 q").unwrap();
+        assert_eq!(adapter.get_cursor_style(id(1)).unwrap(), CursorStyle::BlinkingBar);
+        // Reset: CSI 0 SP q
+        adapter.process(id(1), b"\x1b[0 q").unwrap();
+        assert_eq!(adapter.get_cursor_style(id(1)).unwrap(), CursorStyle::DefaultUserShape);
+    }
+
+    #[test]
+    fn cursor_style_updated_multiple_times() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"\x1b[1 q").unwrap();
+        assert_eq!(adapter.get_cursor_style(id(1)).unwrap(), CursorStyle::BlinkingBlock);
+        adapter.process(id(1), b"\x1b[6 q").unwrap();
+        assert_eq!(adapter.get_cursor_style(id(1)).unwrap(), CursorStyle::SteadyBar);
+    }
+
+    #[test]
+    fn cursor_style_nonexistent_returns_error() {
+        let adapter = Vt100ScreenAdapter::new();
+        assert!(adapter.get_cursor_style(id(99)).is_err());
+    }
+
+    #[test]
+    fn cursor_style_independent_per_terminal() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.create(id(2), default_size()).unwrap();
+        adapter.process(id(1), b"\x1b[5 q").unwrap();
+        adapter.process(id(2), b"\x1b[2 q").unwrap();
+        assert_eq!(adapter.get_cursor_style(id(1)).unwrap(), CursorStyle::BlinkingBar);
+        assert_eq!(adapter.get_cursor_style(id(2)).unwrap(), CursorStyle::SteadyBlock);
     }
 }

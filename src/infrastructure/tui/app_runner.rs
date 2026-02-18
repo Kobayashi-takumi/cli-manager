@@ -1,6 +1,7 @@
 use std::io;
 use std::time::Duration;
 
+use crossterm::cursor::SetCursorStyle as CrosstermCursorStyle;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::execute;
 use crossterm::event::{EnableBracketedPaste, DisableBracketedPaste};
@@ -11,7 +12,7 @@ use ratatui::layout::Rect;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use crate::domain::primitive::TerminalSize;
+use crate::domain::primitive::{CursorStyle, TerminalSize};
 use crate::infrastructure::notification::MacOsNotifier;
 use crate::infrastructure::tui::input::{InputHandler, InputMode};
 use crate::infrastructure::tui::widgets::{dialog, help_overlay, layout, memo_overlay, sidebar, terminal_view};
@@ -54,6 +55,7 @@ pub fn run<P: PtyPort, S: ScreenPort>(mut controller: TuiController<P, S>) -> an
     let mut sidebar_scroll_offset: usize = 0;
     let mut notifier = MacOsNotifier::new();
     let mut in_scrollback = false;
+    let mut last_cursor_style = CursorStyle::DefaultUserShape;
 
     // === Main loop ===
     let result = main_loop(
@@ -66,11 +68,12 @@ pub fn run<P: PtyPort, S: ScreenPort>(mut controller: TuiController<P, S>) -> an
         &mut sidebar_scroll_offset,
         &mut notifier,
         &mut in_scrollback,
+        &mut last_cursor_style,
     );
 
     // === Cleanup (always runs) ===
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableBracketedPaste);
+    let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableBracketedPaste, CrosstermCursorStyle::DefaultUserShape);
     let _ = terminal.show_cursor();
 
     result
@@ -86,6 +89,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
     sidebar_scroll_offset: &mut usize,
     notifier: &mut MacOsNotifier,
     in_scrollback: &mut bool,
+    last_cursor_style: &mut CursorStyle,
 ) -> anyhow::Result<()> {
     while !*should_quit {
         // 1. Draw
@@ -190,6 +194,28 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                 DialogState::None => {}
             }
         })?;
+
+        // 1.5. Apply cursor style from active terminal
+        if !matches!(dialog, DialogState::None) {
+            // Dialogs use their own cursor; no style change needed
+        } else if let Some(t) = controller.usecase().get_active_terminal() {
+            let id = t.id();
+            let style = controller.usecase().screen_port().get_cursor_style(id)
+                .unwrap_or(CursorStyle::DefaultUserShape);
+            if style != *last_cursor_style {
+                let ct_style = match style {
+                    CursorStyle::DefaultUserShape => CrosstermCursorStyle::DefaultUserShape,
+                    CursorStyle::BlinkingBlock => CrosstermCursorStyle::BlinkingBlock,
+                    CursorStyle::SteadyBlock => CrosstermCursorStyle::SteadyBlock,
+                    CursorStyle::BlinkingUnderScore => CrosstermCursorStyle::BlinkingUnderScore,
+                    CursorStyle::SteadyUnderScore => CrosstermCursorStyle::SteadyUnderScore,
+                    CursorStyle::BlinkingBar => CrosstermCursorStyle::BlinkingBar,
+                    CursorStyle::SteadyBar => CrosstermCursorStyle::SteadyBar,
+                };
+                let _ = execute!(io::stdout(), ct_style);
+                *last_cursor_style = style;
+            }
+        }
 
         // 2. Calculate terminal size from right pane
         let frame_size = terminal.size()?;

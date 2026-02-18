@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::domain::primitive::{Cell, Color, CursorPos, NotificationEvent, TerminalId, TerminalSize};
+use crate::domain::primitive::{Cell, Color, CursorPos, CursorStyle, NotificationEvent, TerminalId, TerminalSize};
 use crate::interface_adapter::port::screen_port::ScreenPort;
 use crate::shared::error::AppError;
 
@@ -1079,6 +1079,11 @@ impl ScreenPort for VteScreenAdapter {
             .get(&id)
             .map(|s| s.is_alternate_screen)
             .ok_or(AppError::ScreenNotFound(id))
+    }
+
+    fn get_cursor_style(&self, _id: TerminalId) -> Result<CursorStyle, AppError> {
+        // VteScreenAdapter does not track cursor style
+        Ok(CursorStyle::DefaultUserShape)
     }
 }
 

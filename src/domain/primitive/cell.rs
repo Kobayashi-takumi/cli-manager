@@ -44,6 +44,20 @@ pub struct CursorPos {
     pub col: u16,
 }
 
+/// Cursor shape/style set by DECSCUSR (CSI Ps SP q).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorStyle {
+    /// Terminal default cursor shape.
+    #[default]
+    DefaultUserShape,
+    BlinkingBlock,
+    SteadyBlock,
+    BlinkingUnderScore,
+    SteadyUnderScore,
+    BlinkingBar,
+    SteadyBar,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

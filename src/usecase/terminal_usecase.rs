@@ -432,6 +432,10 @@ mod tests {
         fn is_alternate_screen(&self, _id: TerminalId) -> Result<bool, AppError> {
             Ok(false)
         }
+
+        fn get_cursor_style(&self, _id: TerminalId) -> Result<CursorStyle, AppError> {
+            Ok(CursorStyle::DefaultUserShape)
+        }
     }
 
     // =========================================================================

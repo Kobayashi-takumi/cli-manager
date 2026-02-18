@@ -7,5 +7,5 @@ pub mod notification;
 pub use terminal_id::TerminalId;
 pub use terminal_status::TerminalStatus;
 pub use terminal_size::TerminalSize;
-pub use cell::{Cell, Color, CursorPos};
+pub use cell::{Cell, Color, CursorPos, CursorStyle};
 pub use notification::NotificationEvent;
