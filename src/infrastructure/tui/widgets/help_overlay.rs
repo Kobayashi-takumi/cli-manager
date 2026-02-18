@@ -66,6 +66,7 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
             ("d", "Close terminal"),
             ("r", "Rename"),
             ("m", "Memo"),
+            ("`", "Mini Terminal"),
         ],
     );
     frame.render_widget(Paragraph::new(terminal_lines), columns[0]);
@@ -88,7 +89,7 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
         "SCROLLBACK",
         Color::Yellow,
         &[
-            ("[", "Enter scrollback"),
+            ("[", "Scrollback mode"),
             ("\u{2191}/k", "Scroll up"),
             ("\u{2193}/j", "Scroll down"),
             ("PgUp", "Page up"),
@@ -247,8 +248,8 @@ mod tests {
         );
         // Scrollback column
         assert!(
-            content.contains("Enter scrollback"),
-            "Expected 'Enter scrollback' keybinding"
+            content.contains("Scrollback mode"),
+            "Expected 'Scrollback mode' keybinding"
         );
         // General section
         assert!(content.contains("Quit"), "Expected 'Quit' keybinding");
@@ -370,5 +371,15 @@ mod tests {
     #[test]
     fn help_overlay_zero_size_no_crash() {
         let _buf = render_help(0, 0);
+    }
+
+    #[test]
+    fn help_overlay_renders_mini_terminal_keybinding() {
+        let buf = render_help(80, 24);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("Mini Terminal"),
+            "Expected 'Mini Terminal' keybinding in TERMINAL category"
+        );
     }
 }

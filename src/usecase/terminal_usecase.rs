@@ -209,6 +209,14 @@ impl<P: PtyPort, S: ScreenPort> TerminalUsecase<P, S> {
         Ok(())
     }
 
+    pub fn pty_port(&self) -> &P {
+        &self.pty_port
+    }
+
+    pub fn pty_port_mut(&mut self) -> &mut P {
+        &mut self.pty_port
+    }
+
     pub fn screen_port(&self) -> &S {
         &self.screen_port
     }
@@ -1497,5 +1505,66 @@ mod tests {
         let result = uc.get_active_memo();
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::NoActiveTerminal));
+    }
+
+    // =========================================================================
+    // Tests: pty_port / pty_port_mut accessors
+    // =========================================================================
+
+    #[test]
+    fn pty_port_returns_immutable_reference() {
+        let pty = MockPtyPort::new();
+        let spawn_calls = pty.spawn_calls.clone();
+        let screen = MockScreenPort::new();
+        let mut uc = make_usecase_with_ports(pty, screen);
+        let size = default_size();
+
+        // Spawn a terminal first so the pty has recorded calls
+        uc.create_terminal(None, size).unwrap();
+
+        // Access pty_port() immutably and verify state
+        let calls = uc.pty_port().spawn_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, TerminalId::new(1));
+        drop(calls);
+
+        // Also verify via the clone we made before
+        let ext_calls = spawn_calls.lock().unwrap();
+        assert_eq!(ext_calls.len(), 1);
+    }
+
+    #[test]
+    fn pty_port_mut_returns_mutable_reference() {
+        let pty = MockPtyPort::new();
+        let screen = MockScreenPort::new();
+        let mut uc = make_usecase_with_ports(pty, screen);
+
+        // Use pty_port_mut() to call spawn directly
+        let id = TerminalId::new(100);
+        let size = default_size();
+        uc.pty_port_mut()
+            .spawn(id, "/bin/sh", &PathBuf::from("/tmp"), size)
+            .unwrap();
+
+        // Verify the call was recorded
+        let calls = uc.pty_port().spawn_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, id);
+    }
+
+    #[test]
+    fn pty_port_mut_can_write() {
+        let pty = MockPtyPort::new();
+        let write_calls = pty.write_calls.clone();
+        let screen = MockScreenPort::new();
+        let mut uc = make_usecase_with_ports(pty, screen);
+
+        let id = TerminalId::new(42);
+        uc.pty_port_mut().write(id, b"test data").unwrap();
+
+        let calls = write_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, id);
+        assert_eq!(calls[0].1, b"test data");
     }
 }

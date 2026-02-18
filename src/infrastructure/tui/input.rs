@@ -19,6 +19,7 @@ pub enum InputMode {
     ScrollbackMode,
     MemoEdit,
     HelpView,
+    MiniTerminalInput,
 }
 
 /// Converts crossterm `KeyEvent`s into `AppAction`s using a prefix-key state
@@ -74,6 +75,7 @@ impl InputHandler {
             InputMode::ScrollbackMode => self.handle_scrollback(key),
             InputMode::MemoEdit => None,
             InputMode::HelpView => None,
+            InputMode::MiniTerminalInput => self.handle_mini_terminal(key),
         }
     }
 
@@ -149,11 +151,28 @@ impl InputHandler {
             }
             KeyCode::Char('m') if key.modifiers.is_empty() => Some(AppAction::OpenMemo),
             KeyCode::Char('?') if key.modifiers.is_empty() => Some(AppAction::ShowHelp),
+            KeyCode::Char('`') if key.modifiers.is_empty() => Some(AppAction::ToggleMiniTerminal),
             // Ctrl+b again -> send literal Ctrl+b to child process
             KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(AppAction::WriteToActive(vec![0x02]))
             }
             _ => None, // Cancel - unrecognised prefix command
+        }
+    }
+
+    fn handle_mini_terminal(&mut self, key: KeyEvent) -> Option<AppAction> {
+        // Ctrl+b -> enter prefix mode (same as Normal mode handling)
+        if key.code == KeyCode::Char('b') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.mode = InputMode::PrefixWait(Instant::now());
+            return None;
+        }
+
+        // All other keys -> forward to mini terminal as raw bytes
+        let bytes = key_to_bytes(key, self.application_cursor_keys);
+        if bytes.is_empty() {
+            None
+        } else {
+            Some(AppAction::WriteToMiniTerminal(bytes))
         }
     }
 }
@@ -1363,5 +1382,136 @@ mod tests {
         let action = handler.handle_key(make_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
         assert!(action.is_none());
         assert!(matches!(handler.mode(), InputMode::HelpView));
+    }
+
+    // =========================================================================
+    // Tests: Prefix backtick binding (Task #60)
+    // =========================================================================
+
+    #[test]
+    fn prefix_backtick_produces_toggle_mini_terminal() {
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        let key = make_key(KeyCode::Char('`'), KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+
+        assert!(matches!(action, Some(AppAction::ToggleMiniTerminal)));
+        assert_normal(&handler);
+    }
+
+    // =========================================================================
+    // Tests: MiniTerminalInput mode (Task #60)
+    // =========================================================================
+
+    /// Assert that the handler is in MiniTerminalInput mode.
+    fn assert_mini_terminal_input(handler: &InputHandler) {
+        assert!(
+            matches!(handler.mode(), InputMode::MiniTerminalInput),
+            "expected InputMode::MiniTerminalInput"
+        );
+    }
+
+    #[test]
+    fn mini_terminal_input_regular_char_produces_write_to_mini_terminal() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::MiniTerminalInput);
+
+        let key = make_key(KeyCode::Char('a'), KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+
+        assert!(
+            matches!(action, Some(AppAction::WriteToMiniTerminal(ref b)) if b == &[b'a'])
+        );
+        assert_mini_terminal_input(&handler);
+    }
+
+    #[test]
+    fn mini_terminal_input_ctrl_b_transitions_to_prefix_wait() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::MiniTerminalInput);
+
+        let key = make_key(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        let action = handler.handle_key(key);
+
+        assert!(action.is_none());
+        assert_prefix_wait(&handler);
+    }
+
+    #[test]
+    fn mini_terminal_input_enter_produces_write_to_mini_terminal() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::MiniTerminalInput);
+
+        let key = make_key(KeyCode::Enter, KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+
+        assert!(
+            matches!(action, Some(AppAction::WriteToMiniTerminal(ref b)) if b == &[0x0D])
+        );
+        assert_mini_terminal_input(&handler);
+    }
+
+    #[test]
+    fn mini_terminal_input_arrow_keys_produce_write_to_mini_terminal() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::MiniTerminalInput);
+
+        let key = make_key(KeyCode::Up, KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+
+        assert!(
+            matches!(action, Some(AppAction::WriteToMiniTerminal(ref b)) if b == &[0x1B, b'[', b'A'])
+        );
+        assert_mini_terminal_input(&handler);
+    }
+
+    #[test]
+    fn mini_terminal_input_ctrl_c_produces_write_to_mini_terminal() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::MiniTerminalInput);
+
+        let key = make_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let action = handler.handle_key(key);
+
+        // Ctrl+c = 0x03
+        assert!(
+            matches!(action, Some(AppAction::WriteToMiniTerminal(ref b)) if b == &[0x03])
+        );
+        assert_mini_terminal_input(&handler);
+    }
+
+    #[test]
+    fn mini_terminal_input_unhandled_key_returns_none() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::MiniTerminalInput);
+
+        // F1 key is not mapped in key_to_bytes
+        let key = make_key(KeyCode::F(1), KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+
+        assert!(action.is_none());
+        assert_mini_terminal_input(&handler);
+    }
+
+    #[test]
+    fn mini_terminal_input_full_flow_type_then_prefix_then_toggle() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::MiniTerminalInput);
+
+        // Type a character -> WriteToMiniTerminal
+        let action = handler.handle_key(make_key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::WriteToMiniTerminal(ref b)) if b == &[b'x']));
+        assert_mini_terminal_input(&handler);
+
+        // Ctrl+b -> PrefixWait
+        let action = handler.handle_key(make_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(action.is_none());
+        assert_prefix_wait(&handler);
+
+        // backtick -> ToggleMiniTerminal (returns to Normal)
+        let action = handler.handle_key(make_key(KeyCode::Char('`'), KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ToggleMiniTerminal)));
+        assert_normal(&handler);
     }
 }

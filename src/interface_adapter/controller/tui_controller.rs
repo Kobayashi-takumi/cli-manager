@@ -30,6 +30,8 @@ pub enum AppAction {
     OpenMemo,
     SaveMemo { text: String },
     ShowHelp,
+    ToggleMiniTerminal,
+    WriteToMiniTerminal(Vec<u8>),
 }
 
 /// Thin controller that translates `AppAction`s into usecase calls.
@@ -92,8 +94,10 @@ impl<P: PtyPort, S: ScreenPort> TuiController<P, S> {
             AppAction::SaveMemo { text } => {
                 self.usecase.set_active_memo(text)?;
             }
-            AppAction::OpenMemo => {} // Handled by caller (app_runner)
-            AppAction::ShowHelp => {} // Handled by caller (app_runner)
+            AppAction::OpenMemo => {}              // Handled by caller (app_runner)
+            AppAction::ShowHelp => {}              // Handled by caller (app_runner)
+            AppAction::ToggleMiniTerminal => {}    // Handled by caller (app_runner)
+            AppAction::WriteToMiniTerminal(_) => {} // Handled by caller (app_runner)
         }
         Ok(())
     }
@@ -934,5 +938,64 @@ mod tests {
 
         let result = ctrl.dispatch(AppAction::ShowHelp, size);
         assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // Tests: dispatch(ToggleMiniTerminal)
+    // =========================================================================
+
+    #[test]
+    fn dispatch_toggle_mini_terminal_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+
+        let result = ctrl.dispatch(AppAction::ToggleMiniTerminal, size);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_toggle_mini_terminal_does_not_affect_state() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+
+        ctrl.dispatch(AppAction::CreateTerminal { name: None }, size)
+            .unwrap();
+
+        let result = ctrl.dispatch(AppAction::ToggleMiniTerminal, size);
+        assert!(result.is_ok());
+        assert_eq!(ctrl.usecase().get_terminals().len(), 1);
+        assert_eq!(ctrl.usecase().get_active_index(), Some(0));
+    }
+
+    // =========================================================================
+    // Tests: dispatch(WriteToMiniTerminal)
+    // =========================================================================
+
+    #[test]
+    fn dispatch_write_to_mini_terminal_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+
+        let result = ctrl.dispatch(
+            AppAction::WriteToMiniTerminal(b"hello".to_vec()),
+            size,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_write_to_mini_terminal_does_not_affect_state() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+
+        ctrl.dispatch(AppAction::CreateTerminal { name: None }, size)
+            .unwrap();
+
+        let result = ctrl.dispatch(
+            AppAction::WriteToMiniTerminal(b"data".to_vec()),
+            size,
+        );
+        assert!(result.is_ok());
+        assert_eq!(ctrl.usecase().get_terminals().len(), 1);
     }
 }
