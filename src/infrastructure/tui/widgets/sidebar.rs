@@ -109,8 +109,9 @@ pub fn render(
             Style::default()
         };
 
-        // Line 1: icon + display name + notification mark
+        // Line 1: icon + display name + memo mark + notification mark
         let icon = terminal.status().icon();
+        let memo_mark = if terminal.has_memo() { " [\u{2261}]" } else { "" };
         let notification_mark = if terminal.has_unread_notification() {
             " *"
         } else {
@@ -125,7 +126,7 @@ pub fn render(
             style
         };
         let line1 = Line::from(vec![Span::styled(
-            format!("{} {}{}", icon, terminal.display_name(), notification_mark),
+            format!("{} {}{}{}", icon, terminal.display_name(), memo_mark, notification_mark),
             name_style,
         )]);
         lines.push(line1);
@@ -858,5 +859,93 @@ mod tests {
                 break;
             }
         }
+    }
+
+    // ===== Memo indicator tests =====
+
+    fn create_terminal_with_memo(id: u32, name: &str, memo: &str) -> ManagedTerminal {
+        let mut t = create_terminal(id, name);
+        t.set_memo(memo.to_string());
+        t
+    }
+
+    #[test]
+    fn render_memo_indicator_shown_when_memo_exists() {
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let terminals = vec![create_terminal_with_memo(1, "shell", "a note")];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 40, 20);
+                render(frame, area, &terminals, Some(0), false, 0, &vec![None; terminals.len()]);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let row1: String = (0..40)
+            .map(|x| buf[(x, 1)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            row1.contains("\u{2261}"),
+            "Expected memo indicator '≡' in row1, got: {}",
+            row1
+        );
+    }
+
+    #[test]
+    fn render_no_memo_indicator_when_no_memo() {
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let terminals = vec![create_terminal(1, "shell")];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 40, 20);
+                render(frame, area, &terminals, Some(0), false, 0, &vec![None; terminals.len()]);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let row1: String = (0..40)
+            .map(|x| buf[(x, 1)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            !row1.contains("\u{2261}"),
+            "Expected no memo indicator when no memo, got: {}",
+            row1
+        );
+    }
+
+    #[test]
+    fn render_memo_and_notification_marks_coexist() {
+        let backend = TestBackend::new(50, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut t = create_terminal(1, "shell");
+        t.set_memo("a note".to_string());
+        t.set_notification(crate::domain::primitive::NotificationEvent::Bell);
+        let terminals = vec![t];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 50, 20);
+                render(frame, area, &terminals, None, false, 0, &vec![None; terminals.len()]);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let row1: String = (0..50)
+            .map(|x| buf[(x, 1)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            row1.contains("\u{2261}"),
+            "Expected memo indicator '≡' when both memo and notification, got: {}",
+            row1
+        );
+        assert!(
+            row1.contains("*"),
+            "Expected notification '*' when both memo and notification, got: {}",
+            row1
+        );
     }
 }

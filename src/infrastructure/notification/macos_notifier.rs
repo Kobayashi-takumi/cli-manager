@@ -62,15 +62,10 @@ impl MacOsNotifier {
     /// In test builds, this is a no-op.
     #[cfg(not(test))]
     fn send_notification(summary: &str, body: &str) {
-        let result = notify_rust::Notification::new()
+        let _ = notify_rust::Notification::new()
             .summary(summary)
             .body(body)
             .show();
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-            .open("/tmp/cli_manager_notif_debug.log") {
-            use std::io::Write;
-            let _ = writeln!(f, "[notify-rust] show() result={:?}", result);
-        }
     }
 
     #[cfg(test)]

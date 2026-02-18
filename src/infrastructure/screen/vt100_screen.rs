@@ -16,11 +16,6 @@ struct Vt100Callbacks {
 
 impl vt100::Callbacks for Vt100Callbacks {
     fn audible_bell(&mut self, _: &mut vt100::Screen) {
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-            .open("/tmp/cli_manager_notif_debug.log") {
-            use std::io::Write;
-            let _ = writeln!(f, "[vt100] audible_bell fired! notifications_count={}", self.notifications.len() + 1);
-        }
         self.notifications.push(NotificationEvent::Bell);
     }
 
@@ -261,14 +256,6 @@ impl ScreenPort for Vt100ScreenAdapter {
             .get_mut(&id)
             .ok_or(AppError::ScreenNotFound(id))?;
         let notifications = std::mem::take(&mut inst.parser.callbacks_mut().notifications);
-        if !notifications.is_empty() {
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                .open("/tmp/cli_manager_notif_debug.log") {
-                use std::io::Write;
-                let _ = writeln!(f, "[vt100] drain_notifications id={} count={} events={:?}",
-                    id.value(), notifications.len(), notifications);
-            }
-        }
         Ok(notifications)
     }
 

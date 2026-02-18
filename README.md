@@ -42,6 +42,8 @@ TUI ベースのターミナルマルチプレクサ。複数の CLI プロセ�
 | OSC 7 動的 CWD | シェルの現在ディレクトリをサイドバーに反映 |
 | 通知 | BEL / OSC 9 / OSC 777 検出 → サイドバーマーク + macOS デスクトップ通知 |
 | スクロールバック | 出力履歴を vim ライクなキーバインドでスクロール閲覧（10,000 行バッファ） |
+| リネーム | ターミナル名を後から変更可能 |
+| メモ | 各ターミナルに複数行メモを付与・編集。サイドバーに `[≡]` インジケータ表示 |
 
 ## 必要環境
 
@@ -93,6 +95,8 @@ cargo run
 | `Ctrl+b` → `1`〜`9` | 番号指定でターミナルをジャンプ |
 | `Ctrl+b` → `Ctrl+b` | 子プロセスに `Ctrl+b` を送信 |
 | `Ctrl+b` → `[` | スクロールバックモードに入る |
+| `Ctrl+b` → `r` | アクティブターミナルをリネーム |
+| `Ctrl+b` → `m` | メモを編集 |
 | `Ctrl+b` → `q` | アプリケーション終了 |
 | その他のキー | アクティブターミナルの stdin へパススルー |
 
@@ -110,6 +114,26 @@ cargo run
 | `G` | バッファの末尾にジャンプ |
 | `Esc` / `q` | スクロールバックモードを終了 |
 
+#### リネーム
+
+`Ctrl+b` → `r` でリネームダイアログが開きます。現在の名前がプリセットされた状態で編集でき、`Enter` で確定、`Esc` でキャンセルします。
+
+#### メモ編集
+
+`Ctrl+b` → `m` でメモ編集オーバーレイが開きます。各ターミナルにメモを付けて用途や作業内容を記録できます。
+
+| キーバインド | アクション |
+|---|---|
+| 文字入力 | テキストを入力 |
+| `Ctrl+J` | 改行を挿入 |
+| `↑` / `↓` | カーソルを行間移動 |
+| `←` / `→` | カーソルを左右移動 |
+| `Backspace` | 文字削除（行頭では前行と結合） |
+| `Enter` | メモを保存して閉じる |
+| `Esc` | 変更を破棄して閉じる |
+
+メモが存在するターミナルにはサイドバーに `[≡]` インジケータが表示されます。メモはセッション中のみ保持されます。
+
 ### プレフィックスキーの仕組み
 
 `Ctrl+b` は tmux と同じプレフィックスキーです。InputHandler が以下のステートマシンで管理します。
@@ -120,9 +144,13 @@ stateDiagram-v2
     Normal --> PrefixWait : Ctrl+b 押下
     PrefixWait --> Normal : コマンドキー入力\n(c/d/n/p/1-9/q)
     PrefixWait --> ScrollbackMode : [ 押下
+    PrefixWait --> DialogInput : r 押下 (リネーム)
+    PrefixWait --> MemoEdit : m 押下 (メモ編集)
     PrefixWait --> Normal : 1秒タイムアウト\n(Ctrl+b を子プロセスへ送信)
     PrefixWait --> Normal : Ctrl+b 再押下\n(Ctrl+b を子プロセスへ送信)
     ScrollbackMode --> Normal : Esc / q 押下
+    DialogInput --> Normal : Enter / Esc
+    MemoEdit --> Normal : Enter (保存) / Esc (破棄)
 ```
 
 **ポイント:**
@@ -142,7 +170,7 @@ stateDiagram-v2
 │   /projects/my-app    │                                    │
 │   claude running      │ 了解です。テストを作成します。        │
 │───────────────────────│ src/lib.rs を読んでいます...         │
-│ ○ 2: api-srv         │                                    │
+│ ○ 2: api-srv [≡]     │                                    │
 │   /projects/api       │ テストを書きました：                 │
 │   idle                │ - test_create_task                  │
 │───────────────────────│ - test_delete_task                  │
@@ -165,7 +193,7 @@ block-beta
         A["サイドバー (25文字固定)"]
         B["ターミナル一覧"]
         C["ステータスアイコン"]
-        D["通知マーク (*)"]
+        D["通知マーク (*) / メモマーク ([≡])"]
         E["ヘルプバー"]
     end
     block:main:1
@@ -185,6 +213,7 @@ block-beta
 | `○` | Idle | アイドル状態 |
 | `✗` | Exited | プロセス終了済み（出力は保持） |
 | `*` | 通知あり | 未読通知（BEL / OSC 9 / OSC 777） |
+| `[≡]` | メモあり | ターミナルにメモが付与されている |
 
 ## ターミナルのライフサイクル
 
@@ -234,7 +263,7 @@ graph TD
         VT100["Vt100ScreenAdapter<br/>(vt100)"]
         TUI["TUI<br/>(ratatui + crossterm)"]
         INPUT["InputHandler"]
-        WIDGETS["Widgets<br/>(sidebar, terminal_view, dialog)"]
+        WIDGETS["Widgets<br/>(sidebar, terminal_view,<br/>dialog, memo_overlay)"]
         NOTIF["MacOsNotifier<br/>(notify-rust)"]
     end
 
@@ -387,7 +416,8 @@ src/
 │   │       ├── layout.rs                # 2ペインレイアウト
 │   │       ├── sidebar.rs               # サイドバー (ターミナル一覧 + 通知マーク)
 │   │       ├── terminal_view.rs         # メインペイン (出力表示 + ワイド文字)
-│   │       └── dialog.rs                # 確認ダイアログ
+│   │       ├── dialog.rs                # 確認・リネームダイアログ
+│   │       └── memo_overlay.rs          # メモ編集オーバーレイ
 │   └── notification/
 │       └── macos_notifier.rs            # macOS デスクトップ通知 (notify-rust)
 └── shared/
@@ -405,7 +435,7 @@ cargo check
 # ビルド
 cargo build
 
-# テスト（全 553 件）
+# テスト（全 581 件）
 cargo test
 
 # 特定のテストのみ実行
@@ -417,36 +447,38 @@ cargo clippy
 
 ### テスト構成
 
-合計 **553** ユニットテスト。各モジュールごとの内訳は以下の通りです。
+合計 **581** ユニットテスト。各モジュールごとの内訳は以下の通りです。
 
 ```mermaid
-pie title ユニットテスト構成 (553件)
+pie title ユニットテスト構成 (581件)
     "VteScreenAdapter (176)" : 176
     "Vt100ScreenAdapter (85)" : 85
-    "InputHandler (79)" : 79
-    "TerminalUsecase (50)" : 50
-    "Sidebar (29)" : 29
+    "InputHandler (83)" : 83
+    "TerminalUsecase (56)" : 56
+    "Sidebar (32)" : 32
     "TerminalView (30)" : 30
-    "TuiController (27)" : 27
+    "TuiController (31)" : 31
+    "ManagedTerminal (17)" : 17
     "MacOsNotifier (16)" : 16
     "NotificationEvent (15)" : 15
-    "その他 (46)" : 46
+    "その他 (40)" : 40
 ```
 
 | モジュール | テスト数 | テスト対象 |
 |-----------|---------|-----------|
 | `VteScreenAdapter` | 176 | ANSI パース、セルグリッド、カーソル移動、代替画面、スクロールリージョン、ワイド文字、OSC タイトル、通知 |
 | `Vt100ScreenAdapter` | 85 | vt100 ベースパース、セル属性、OSC 7 CWD、OSC タイトル、通知、スクロールバック |
-| `InputHandler` | 79 | ステートマシン、プレフィックスキー、タイムアウト、アプリケーションカーソルキー、ブラケットペースト、スクロールバックモード |
-| `TerminalUsecase` | 50 | CRUD 操作、ポーリング、通知収集、エラーハンドリング |
-| `Sidebar` | 29 | ターミナル一覧描画、動的 CWD 表示、通知マーク |
+| `InputHandler` | 83 | ステートマシン、プレフィックスキー、タイムアウト、アプリケーションカーソルキー、ブラケットペースト、スクロールバックモード、メモ編集モード |
+| `TerminalUsecase` | 56 | CRUD 操作、ポーリング、通知収集、リネーム、メモ操作、エラーハンドリング |
+| `Sidebar` | 32 | ターミナル一覧描画、動的 CWD 表示、通知マーク、メモインジケータ |
 | `TerminalView` | 30 | 出力表示、ワイド文字クリッピング、カーソル位置、スクロールバック表示 |
-| `TuiController` | 27 | AppAction ディスパッチ、状態管理 |
+| `TuiController` | 31 | AppAction ディスパッチ、状態管理、リネーム・メモ操作 |
+| `ManagedTerminal` | 17 | エンティティ操作、通知フラグ、リネーム、メモ |
 | `MacOsNotifier` | 16 | デスクトップ通知送信、レート制限 |
 | `NotificationEvent` | 15 | Bell/Osc9/Osc777 イベント |
-| `Dialog` | 10 | 確認ダイアログ描画 |
+| `Dialog` | 11 | 確認・リネームダイアログ描画 |
 | `OSC 7 Parser` | 10 | URI パース、パーセントデコード |
-| `ManagedTerminal` | 9 | エンティティ操作、通知フラグ |
+| `MemoOverlay` | 3 | メモ編集オーバーレイ描画 |
 | `Layout` | 6 | 2ペインレイアウト計算 |
 | `Cell` | 5 | セル属性、色 |
 

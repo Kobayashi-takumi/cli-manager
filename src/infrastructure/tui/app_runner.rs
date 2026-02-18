@@ -14,7 +14,7 @@ use ratatui::backend::CrosstermBackend;
 use crate::domain::primitive::TerminalSize;
 use crate::infrastructure::notification::MacOsNotifier;
 use crate::infrastructure::tui::input::{InputHandler, InputMode};
-use crate::infrastructure::tui::widgets::{dialog, layout, sidebar, terminal_view};
+use crate::infrastructure::tui::widgets::{dialog, layout, memo_overlay, sidebar, terminal_view};
 use crate::interface_adapter::controller::tui_controller::{AppAction, TuiController};
 use crate::interface_adapter::port::{PtyPort, ScreenPort};
 
@@ -30,6 +30,8 @@ enum DialogState {
     None,
     CreateTerminal { input: String, cursor_pos: usize },
     ConfirmClose { terminal_name: String, is_running: bool },
+    Rename { input: String, cursor_pos: usize },
+    MemoEdit { text: String, cursor_row: usize, cursor_col: usize },
 }
 
 /// Main TUI event loop.
@@ -169,6 +171,18 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                 } => {
                     dialog::render_confirm_close_dialog(frame, terminal_name, *is_running);
                 }
+                DialogState::Rename { input, cursor_pos } => {
+                    dialog::render_rename_dialog(frame, input, *cursor_pos);
+                }
+                DialogState::MemoEdit { text, cursor_row, cursor_col } => {
+                    memo_overlay::render_memo_overlay(
+                        frame,
+                        areas.main_pane,
+                        text,
+                        *cursor_row,
+                        *cursor_col,
+                    );
+                }
                 DialogState::None => {}
             }
         })?;
@@ -193,21 +207,8 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
 
         // 3.5. Drain pending notifications and send desktop notifications
         let pending = controller.usecase_mut().take_pending_notifications();
-        if !pending.is_empty() {
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                .open("/tmp/cli_manager_notif_debug.log") {
-                use std::io::Write;
-                let _ = writeln!(f, "[app_runner] pending={} items: {:?}",
-                    pending.len(), pending.iter().map(|(n, e)| format!("{}:{:?}", n, e)).collect::<Vec<_>>());
-            }
-        }
         for (terminal_name, event) in &pending {
-            let sent = notifier.notify(terminal_name, event);
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                .open("/tmp/cli_manager_notif_debug.log") {
-                use std::io::Write;
-                let _ = writeln!(f, "[app_runner] notify({}, {:?}) => sent={}", terminal_name, event, sent);
-            }
+            notifier.notify(terminal_name, event);
         }
 
         // 4. Check prefix timeout
@@ -435,6 +436,33 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             *in_scrollback = false;
             input_handler.set_mode(InputMode::Normal);
         }
+        AppAction::RenameTerminal { .. } => {
+            exit_scrollback_if_active(controller, input_handler, in_scrollback);
+            if let Some(terminal) = controller.usecase().get_active_terminal() {
+                let current_name = terminal.name().to_string();
+                let cursor_pos = current_name.len();
+                *dialog = DialogState::Rename {
+                    input: current_name,
+                    cursor_pos,
+                };
+                input_handler.set_mode(InputMode::DialogInput);
+            }
+        }
+        AppAction::OpenMemo => {
+            exit_scrollback_if_active(controller, input_handler, in_scrollback);
+            if let Ok(memo) = controller.usecase().get_active_memo() {
+                let text = memo.to_string();
+                let lines: Vec<&str> = text.split('\n').collect();
+                let cursor_row = lines.len() - 1;
+                let cursor_col = lines.last().map_or(0, |l| l.len());
+                *dialog = DialogState::MemoEdit {
+                    text,
+                    cursor_row,
+                    cursor_col,
+                };
+                input_handler.set_mode(InputMode::MemoEdit);
+            }
+        }
         other => {
             match controller.dispatch(other, size) {
                 Ok(()) => {}
@@ -509,6 +537,120 @@ fn handle_dialog_key<P: PtyPort, S: ScreenPort>(
                 input_handler.set_mode(InputMode::Normal);
             }
             KeyCode::Char('n') | KeyCode::Esc => {
+                *dialog = DialogState::None;
+                input_handler.set_mode(InputMode::Normal);
+            }
+            _ => {}
+        },
+        DialogState::Rename { input, cursor_pos } => match key.code {
+            KeyCode::Char(c) => {
+                input.insert(*cursor_pos, c);
+                *cursor_pos += 1;
+            }
+            KeyCode::Backspace => {
+                if *cursor_pos > 0 {
+                    input.remove(*cursor_pos - 1);
+                    *cursor_pos -= 1;
+                }
+            }
+            KeyCode::Left => {
+                if *cursor_pos > 0 {
+                    *cursor_pos -= 1;
+                }
+            }
+            KeyCode::Right => {
+                if *cursor_pos < input.len() {
+                    *cursor_pos += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if !input.is_empty() {
+                    controller.dispatch(
+                        AppAction::RenameTerminal { name: input.clone() },
+                        size,
+                    )?;
+                }
+                *dialog = DialogState::None;
+                input_handler.set_mode(InputMode::Normal);
+            }
+            KeyCode::Esc => {
+                *dialog = DialogState::None;
+                input_handler.set_mode(InputMode::Normal);
+            }
+            _ => {}
+        },
+        DialogState::MemoEdit { text, cursor_row, cursor_col } => match key.code {
+            // Ctrl+J: insert newline
+            KeyCode::Char('j') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                let mut lines: Vec<String> = text.split('\n').map(String::from).collect();
+                if *cursor_row < lines.len() {
+                    let current_line = &lines[*cursor_row];
+                    let (before, after) = current_line.split_at(*cursor_col);
+                    let before = before.to_string();
+                    let after = after.to_string();
+                    lines[*cursor_row] = before;
+                    lines.insert(*cursor_row + 1, after);
+                    *cursor_row += 1;
+                    *cursor_col = 0;
+                }
+                *text = lines.join("\n");
+            }
+            // Enter: save and close
+            KeyCode::Enter => {
+                controller.dispatch(
+                    AppAction::SaveMemo { text: text.clone() },
+                    size,
+                )?;
+                *dialog = DialogState::None;
+                input_handler.set_mode(InputMode::Normal);
+            }
+            KeyCode::Char(c) => {
+                let mut lines: Vec<String> = text.split('\n').map(String::from).collect();
+                if *cursor_row < lines.len() {
+                    lines[*cursor_row].insert(*cursor_col, c);
+                    *cursor_col += 1;
+                }
+                *text = lines.join("\n");
+            }
+            KeyCode::Backspace => {
+                let mut lines: Vec<String> = text.split('\n').map(String::from).collect();
+                if *cursor_col > 0 {
+                    lines[*cursor_row].remove(*cursor_col - 1);
+                    *cursor_col -= 1;
+                } else if *cursor_row > 0 {
+                    let current = lines.remove(*cursor_row);
+                    *cursor_row -= 1;
+                    *cursor_col = lines[*cursor_row].len();
+                    lines[*cursor_row].push_str(&current);
+                }
+                *text = lines.join("\n");
+            }
+            KeyCode::Up => {
+                if *cursor_row > 0 {
+                    *cursor_row -= 1;
+                    let lines: Vec<&str> = text.split('\n').collect();
+                    *cursor_col = (*cursor_col).min(lines[*cursor_row].len());
+                }
+            }
+            KeyCode::Down => {
+                let lines: Vec<&str> = text.split('\n').collect();
+                if *cursor_row + 1 < lines.len() {
+                    *cursor_row += 1;
+                    *cursor_col = (*cursor_col).min(lines[*cursor_row].len());
+                }
+            }
+            KeyCode::Left => {
+                if *cursor_col > 0 {
+                    *cursor_col -= 1;
+                }
+            }
+            KeyCode::Right => {
+                let lines: Vec<&str> = text.split('\n').collect();
+                if !lines.is_empty() && *cursor_col < lines[*cursor_row].len() {
+                    *cursor_col += 1;
+                }
+            }
+            KeyCode::Esc => {
                 *dialog = DialogState::None;
                 input_handler.set_mode(InputMode::Normal);
             }

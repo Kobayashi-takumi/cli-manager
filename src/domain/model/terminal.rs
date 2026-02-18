@@ -9,6 +9,7 @@ pub struct ManagedTerminal {
     status: TerminalStatus,
     last_notification: Option<NotificationEvent>,
     has_unread_notification: bool,
+    memo: String,
 }
 
 impl ManagedTerminal {
@@ -20,6 +21,7 @@ impl ManagedTerminal {
             status: TerminalStatus::Running,
             last_notification: None,
             has_unread_notification: false,
+            memo: String::new(),
         }
     }
 
@@ -29,6 +31,10 @@ impl ManagedTerminal {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn set_name(&mut self, name: String) {
+        self.name = name;
     }
 
     pub fn cwd(&self) -> &Path {
@@ -62,6 +68,18 @@ impl ManagedTerminal {
 
     pub fn clear_notification(&mut self) {
         self.has_unread_notification = false;
+    }
+
+    pub fn memo(&self) -> &str {
+        &self.memo
+    }
+
+    pub fn set_memo(&mut self, memo: String) {
+        self.memo = memo;
+    }
+
+    pub fn has_memo(&self) -> bool {
+        !self.memo.is_empty()
     }
 }
 
@@ -183,5 +201,66 @@ mod tests {
         terminal.set_notification(osc9.clone());
         assert!(terminal.has_unread_notification());
         assert_eq!(terminal.last_notification(), Some(&osc9));
+    }
+
+    // =========================================================================
+    // Tests: set_name
+    // =========================================================================
+
+    #[test]
+    fn set_name_changes_the_name() {
+        let mut terminal = make_terminal();
+        assert_eq!(terminal.name(), "test-term");
+
+        terminal.set_name("new-name".to_string());
+        assert_eq!(terminal.name(), "new-name");
+    }
+
+    #[test]
+    fn set_name_is_reflected_in_display_name() {
+        let mut terminal = make_terminal();
+        terminal.set_name("renamed".to_string());
+        assert_eq!(terminal.display_name(), "1: renamed");
+    }
+
+    // =========================================================================
+    // Tests: memo
+    // =========================================================================
+
+    #[test]
+    fn initial_memo_returns_empty_string() {
+        let terminal = make_terminal();
+        assert_eq!(terminal.memo(), "");
+    }
+
+    #[test]
+    fn set_memo_sets_the_memo() {
+        let mut terminal = make_terminal();
+        terminal.set_memo("remember this".to_string());
+        assert_eq!(terminal.memo(), "remember this");
+    }
+
+    #[test]
+    fn has_memo_returns_false_when_empty() {
+        let terminal = make_terminal();
+        assert!(!terminal.has_memo());
+    }
+
+    #[test]
+    fn has_memo_returns_true_when_set() {
+        let mut terminal = make_terminal();
+        terminal.set_memo("some note".to_string());
+        assert!(terminal.has_memo());
+    }
+
+    #[test]
+    fn set_memo_to_empty_makes_has_memo_return_false() {
+        let mut terminal = make_terminal();
+        terminal.set_memo("temporary note".to_string());
+        assert!(terminal.has_memo());
+
+        terminal.set_memo(String::new());
+        assert!(!terminal.has_memo());
+        assert_eq!(terminal.memo(), "");
     }
 }

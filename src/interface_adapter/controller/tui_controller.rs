@@ -26,6 +26,9 @@ pub enum AppAction {
     ScrollbackPageDown,
     ScrollbackTop,
     ScrollbackBottom,
+    RenameTerminal { name: String },
+    OpenMemo,
+    SaveMemo { text: String },
 }
 
 /// Thin controller that translates `AppAction`s into usecase calls.
@@ -80,6 +83,15 @@ impl<P: PtyPort, S: ScreenPort> TuiController<P, S> {
             | AppAction::ScrollbackPageDown
             | AppAction::ScrollbackTop
             | AppAction::ScrollbackBottom => {} // Handled by caller (app_runner)
+            AppAction::RenameTerminal { name } => {
+                if !name.is_empty() {
+                    self.usecase.rename_active_terminal(name)?;
+                }
+            }
+            AppAction::SaveMemo { text } => {
+                self.usecase.set_active_memo(text)?;
+            }
+            AppAction::OpenMemo => {} // Handled by caller (app_runner)
         }
         Ok(())
     }
@@ -828,5 +840,76 @@ mod tests {
         // Use usecase_mut to call take_pending_notifications
         let pending = ctrl.usecase_mut().take_pending_notifications();
         assert!(pending.is_empty());
+    }
+
+    // =========================================================================
+    // Tests: dispatch(RenameTerminal)
+    // =========================================================================
+
+    #[test]
+    fn dispatch_rename_terminal_changes_name() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+
+        ctrl.dispatch(
+            AppAction::CreateTerminal { name: Some("old".to_string()) },
+            size,
+        ).unwrap();
+
+        ctrl.dispatch(
+            AppAction::RenameTerminal { name: "new".to_string() },
+            size,
+        ).unwrap();
+
+        assert_eq!(ctrl.usecase().get_active_terminal().unwrap().name(), "new");
+    }
+
+    #[test]
+    fn dispatch_rename_terminal_empty_name_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+
+        ctrl.dispatch(
+            AppAction::CreateTerminal { name: Some("keep".to_string()) },
+            size,
+        ).unwrap();
+
+        ctrl.dispatch(
+            AppAction::RenameTerminal { name: String::new() },
+            size,
+        ).unwrap();
+
+        assert_eq!(ctrl.usecase().get_active_terminal().unwrap().name(), "keep");
+    }
+
+    // =========================================================================
+    // Tests: dispatch(SaveMemo)
+    // =========================================================================
+
+    #[test]
+    fn dispatch_save_memo_sets_memo() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+
+        ctrl.dispatch(
+            AppAction::CreateTerminal { name: None },
+            size,
+        ).unwrap();
+
+        ctrl.dispatch(
+            AppAction::SaveMemo { text: "my note".to_string() },
+            size,
+        ).unwrap();
+
+        assert_eq!(ctrl.usecase().get_active_memo().unwrap(), "my note");
+    }
+
+    #[test]
+    fn dispatch_open_memo_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+
+        let result = ctrl.dispatch(AppAction::OpenMemo, size);
+        assert!(result.is_ok());
     }
 }

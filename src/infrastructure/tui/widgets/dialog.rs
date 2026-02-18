@@ -48,6 +48,41 @@ pub fn render_create_dialog(frame: &mut Frame, input: &str, cursor_pos: usize) {
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
+pub fn render_rename_dialog(frame: &mut Frame, input: &str, cursor_pos: usize) {
+    let area = frame.area();
+    let dialog_area = centered_rect(30, 7, area);
+
+    frame.render_widget(Clear, dialog_area);
+
+    let block = Block::default()
+        .title(" Rename Terminal ")
+        .borders(Borders::ALL)
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(dialog_area);
+    frame.render_widget(block, dialog_area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  Name: "),
+            Span::styled(input, Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  [Enter] Confirm  [Esc] Cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
+
+    let cursor_x = inner.x + 8 + cursor_pos as u16;
+    let cursor_y = inner.y + 1;
+    frame.set_cursor_position((cursor_x, cursor_y));
+}
+
 pub fn render_confirm_close_dialog(frame: &mut Frame, terminal_name: &str, is_running: bool) {
     if !is_running {
         return; // No dialog needed for exited terminals
@@ -283,5 +318,44 @@ mod tests {
             }
         }
         assert!(!found_close, "Should not render dialog for exited terminal");
+    }
+
+    // --- render_rename_dialog tests ---
+
+    #[test]
+    fn render_rename_dialog_shows_title_and_input() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_rename_dialog(frame, "old-name", 8);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+
+        let mut found_title = false;
+        let mut found_name = false;
+        let mut found_help = false;
+
+        for y in 0..24u16 {
+            let row: String = (0..80u16)
+                .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                .collect();
+            if row.contains("Rename Terminal") {
+                found_title = true;
+            }
+            if row.contains("Name:") && row.contains("old-name") {
+                found_name = true;
+            }
+            if row.contains("[Enter] Confirm") {
+                found_help = true;
+            }
+        }
+
+        assert!(found_title, "Expected dialog title 'Rename Terminal'");
+        assert!(found_name, "Expected 'Name:' with input 'old-name'");
+        assert!(found_help, "Expected help text '[Enter] Confirm'");
     }
 }

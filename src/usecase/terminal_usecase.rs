@@ -186,6 +186,23 @@ impl<P: PtyPort, S: ScreenPort> TerminalUsecase<P, S> {
         std::mem::take(&mut self.pending_notifications)
     }
 
+    pub fn rename_active_terminal(&mut self, name: String) -> Result<(), AppError> {
+        let index = self.active_index.ok_or(AppError::NoActiveTerminal)?;
+        self.terminals[index].set_name(name);
+        Ok(())
+    }
+
+    pub fn get_active_memo(&self) -> Result<&str, AppError> {
+        let index = self.active_index.ok_or(AppError::NoActiveTerminal)?;
+        Ok(self.terminals[index].memo())
+    }
+
+    pub fn set_active_memo(&mut self, memo: String) -> Result<(), AppError> {
+        let index = self.active_index.ok_or(AppError::NoActiveTerminal)?;
+        self.terminals[index].set_memo(memo);
+        Ok(())
+    }
+
     pub fn screen_port(&self) -> &S {
         &self.screen_port
     }
@@ -1401,5 +1418,70 @@ mod tests {
         assert!(!uc.get_terminals()[0].has_unread_notification());
         let pending = uc.take_pending_notifications();
         assert!(pending.is_empty());
+    }
+
+    // =========================================================================
+    // Tests: rename_active_terminal
+    // =========================================================================
+
+    #[test]
+    fn rename_active_terminal_changes_name() {
+        let mut uc = make_usecase();
+        let size = default_size();
+        uc.create_terminal(Some("original".to_string()), size).unwrap();
+
+        uc.rename_active_terminal("renamed".to_string()).unwrap();
+
+        assert_eq!(uc.get_active_terminal().unwrap().name(), "renamed");
+    }
+
+    #[test]
+    fn rename_active_terminal_no_active_returns_error() {
+        let mut uc = make_usecase();
+
+        let result = uc.rename_active_terminal("name".to_string());
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::NoActiveTerminal));
+    }
+
+    // =========================================================================
+    // Tests: get_active_memo / set_active_memo
+    // =========================================================================
+
+    #[test]
+    fn get_active_memo_initial_is_empty() {
+        let mut uc = make_usecase();
+        let size = default_size();
+        uc.create_terminal(None, size).unwrap();
+
+        assert_eq!(uc.get_active_memo().unwrap(), "");
+    }
+
+    #[test]
+    fn set_active_memo_stores_memo() {
+        let mut uc = make_usecase();
+        let size = default_size();
+        uc.create_terminal(None, size).unwrap();
+
+        uc.set_active_memo("my memo".to_string()).unwrap();
+        assert_eq!(uc.get_active_memo().unwrap(), "my memo");
+    }
+
+    #[test]
+    fn set_active_memo_no_active_returns_error() {
+        let mut uc = make_usecase();
+
+        let result = uc.set_active_memo("memo".to_string());
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::NoActiveTerminal));
+    }
+
+    #[test]
+    fn get_active_memo_no_active_returns_error() {
+        let uc = make_usecase();
+
+        let result = uc.get_active_memo();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::NoActiveTerminal));
     }
 }

@@ -17,6 +17,7 @@ pub enum InputMode {
     PrefixWait(Instant),
     DialogInput,
     ScrollbackMode,
+    MemoEdit,
 }
 
 /// Converts crossterm `KeyEvent`s into `AppAction`s using a prefix-key state
@@ -70,6 +71,7 @@ impl InputHandler {
             InputMode::PrefixWait(_) => self.handle_prefix(key),
             InputMode::DialogInput => None,
             InputMode::ScrollbackMode => self.handle_scrollback(key),
+            InputMode::MemoEdit => None,
         }
     }
 
@@ -140,6 +142,10 @@ impl InputHandler {
             KeyCode::Char('q') if key.modifiers.is_empty() => Some(AppAction::Quit),
             KeyCode::Char('o') if key.modifiers.is_empty() => Some(AppAction::ToggleFocus),
             KeyCode::Char('[') if key.modifiers.is_empty() => Some(AppAction::EnterScrollback),
+            KeyCode::Char('r') if key.modifiers.is_empty() => {
+                Some(AppAction::RenameTerminal { name: String::new() })
+            }
+            KeyCode::Char('m') if key.modifiers.is_empty() => Some(AppAction::OpenMemo),
             // Ctrl+b again -> send literal Ctrl+b to child process
             KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(AppAction::WriteToActive(vec![0x02]))
@@ -1260,5 +1266,55 @@ mod tests {
         // Normal mode works again
         let action = handler.handle_key(make_key(KeyCode::Char('a'), KeyModifiers::NONE));
         assert!(matches!(action, Some(AppAction::WriteToActive(ref b)) if b == &[b'a']));
+    }
+
+    // =========================================================================
+    // Tests: Prefix r/m bindings (Phase 11)
+    // =========================================================================
+
+    #[test]
+    fn prefix_r_produces_rename_terminal() {
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        let key = make_key(KeyCode::Char('r'), KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+
+        assert!(matches!(action, Some(AppAction::RenameTerminal { .. })));
+        assert_normal(&handler);
+    }
+
+    #[test]
+    fn prefix_m_produces_open_memo() {
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        let key = make_key(KeyCode::Char('m'), KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+
+        assert!(matches!(action, Some(AppAction::OpenMemo)));
+        assert_normal(&handler);
+    }
+
+    // =========================================================================
+    // Tests: MemoEdit mode (Phase 11)
+    // =========================================================================
+
+    #[test]
+    fn memo_edit_mode_returns_none_for_any_key() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::MemoEdit);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn memo_edit_mode_stays_in_mode() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::MemoEdit);
+
+        handler.handle_key(make_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(handler.mode(), InputMode::MemoEdit));
     }
 }
