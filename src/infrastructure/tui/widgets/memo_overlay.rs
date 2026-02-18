@@ -3,6 +3,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 /// Render the memo editing overlay centered within the given area.
 ///
@@ -58,8 +59,12 @@ pub fn render_memo_overlay(
     )));
     frame.render_widget(hint, hint_area);
 
-    // Set cursor position
-    let cursor_x = inner.x + cursor_col as u16;
+    // Set cursor position — cursor_col is a char count, compute display width
+    let current_line = text.split('\n').nth(cursor_row).unwrap_or("");
+    let display_width: usize = current_line.chars().take(cursor_col)
+        .collect::<String>()
+        .width();
+    let cursor_x = inner.x + display_width as u16;
     let cursor_y = inner.y + cursor_row as u16;
     if cursor_x < inner.x + inner.width && cursor_y < inner.y + text_area_height {
         frame.set_cursor_position((cursor_x, cursor_y));

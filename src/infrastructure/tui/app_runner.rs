@@ -12,6 +12,15 @@ use ratatui::layout::Rect;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+/// Convert a character-based position to a byte index in a string.
+/// If `char_pos` exceeds the number of characters, returns `s.len()`.
+fn char_to_byte_index(s: &str, char_pos: usize) -> usize {
+    s.char_indices()
+        .nth(char_pos)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
+}
+
 use crate::domain::primitive::{CursorStyle, TerminalSize};
 use crate::infrastructure::notification::MacOsNotifier;
 use crate::infrastructure::tui::input::{InputHandler, InputMode};
@@ -470,7 +479,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             exit_scrollback_if_active(controller, input_handler, in_scrollback);
             if let Some(terminal) = controller.usecase().get_active_terminal() {
                 let current_name = terminal.name().to_string();
-                let cursor_pos = current_name.len();
+                let cursor_pos = current_name.chars().count();
                 *dialog = DialogState::Rename {
                     input: current_name,
                     cursor_pos,
@@ -484,7 +493,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                 let text = memo.to_string();
                 let lines: Vec<&str> = text.split('\n').collect();
                 let cursor_row = lines.len() - 1;
-                let cursor_col = lines.last().map_or(0, |l| l.len());
+                let cursor_col = lines.last().map_or(0, |l| l.chars().count());
                 *dialog = DialogState::MemoEdit {
                     text,
                     cursor_row,
@@ -540,12 +549,14 @@ fn handle_dialog_key<P: PtyPort, S: ScreenPort>(
     match dialog {
         DialogState::CreateTerminal { input, cursor_pos } => match key.code {
             KeyCode::Char(c) => {
-                input.insert(*cursor_pos, c);
+                let byte_idx = char_to_byte_index(input, *cursor_pos);
+                input.insert(byte_idx, c);
                 *cursor_pos += 1;
             }
             KeyCode::Backspace => {
                 if *cursor_pos > 0 {
-                    input.remove(*cursor_pos - 1);
+                    let byte_idx = char_to_byte_index(input, *cursor_pos - 1);
+                    input.remove(byte_idx);
                     *cursor_pos -= 1;
                 }
             }
@@ -579,12 +590,14 @@ fn handle_dialog_key<P: PtyPort, S: ScreenPort>(
         },
         DialogState::Rename { input, cursor_pos } => match key.code {
             KeyCode::Char(c) => {
-                input.insert(*cursor_pos, c);
+                let byte_idx = char_to_byte_index(input, *cursor_pos);
+                input.insert(byte_idx, c);
                 *cursor_pos += 1;
             }
             KeyCode::Backspace => {
                 if *cursor_pos > 0 {
-                    input.remove(*cursor_pos - 1);
+                    let byte_idx = char_to_byte_index(input, *cursor_pos - 1);
+                    input.remove(byte_idx);
                     *cursor_pos -= 1;
                 }
             }
@@ -594,7 +607,7 @@ fn handle_dialog_key<P: PtyPort, S: ScreenPort>(
                 }
             }
             KeyCode::Right => {
-                if *cursor_pos < input.len() {
+                if *cursor_pos < input.chars().count() {
                     *cursor_pos += 1;
                 }
             }
@@ -620,7 +633,8 @@ fn handle_dialog_key<P: PtyPort, S: ScreenPort>(
                 let mut lines: Vec<String> = text.split('\n').map(String::from).collect();
                 if *cursor_row < lines.len() {
                     let current_line = &lines[*cursor_row];
-                    let (before, after) = current_line.split_at(*cursor_col);
+                    let byte_idx = char_to_byte_index(current_line, *cursor_col);
+                    let (before, after) = current_line.split_at(byte_idx);
                     let before = before.to_string();
                     let after = after.to_string();
                     lines[*cursor_row] = before;
@@ -642,7 +656,8 @@ fn handle_dialog_key<P: PtyPort, S: ScreenPort>(
             KeyCode::Char(c) => {
                 let mut lines: Vec<String> = text.split('\n').map(String::from).collect();
                 if *cursor_row < lines.len() {
-                    lines[*cursor_row].insert(*cursor_col, c);
+                    let byte_idx = char_to_byte_index(&lines[*cursor_row], *cursor_col);
+                    lines[*cursor_row].insert(byte_idx, c);
                     *cursor_col += 1;
                 }
                 *text = lines.join("\n");
@@ -650,12 +665,13 @@ fn handle_dialog_key<P: PtyPort, S: ScreenPort>(
             KeyCode::Backspace => {
                 let mut lines: Vec<String> = text.split('\n').map(String::from).collect();
                 if *cursor_col > 0 {
-                    lines[*cursor_row].remove(*cursor_col - 1);
+                    let byte_idx = char_to_byte_index(&lines[*cursor_row], *cursor_col - 1);
+                    lines[*cursor_row].remove(byte_idx);
                     *cursor_col -= 1;
                 } else if *cursor_row > 0 {
                     let current = lines.remove(*cursor_row);
                     *cursor_row -= 1;
-                    *cursor_col = lines[*cursor_row].len();
+                    *cursor_col = lines[*cursor_row].chars().count();
                     lines[*cursor_row].push_str(&current);
                 }
                 *text = lines.join("\n");
@@ -664,14 +680,14 @@ fn handle_dialog_key<P: PtyPort, S: ScreenPort>(
                 if *cursor_row > 0 {
                     *cursor_row -= 1;
                     let lines: Vec<&str> = text.split('\n').collect();
-                    *cursor_col = (*cursor_col).min(lines[*cursor_row].len());
+                    *cursor_col = (*cursor_col).min(lines[*cursor_row].chars().count());
                 }
             }
             KeyCode::Down => {
                 let lines: Vec<&str> = text.split('\n').collect();
                 if *cursor_row + 1 < lines.len() {
                     *cursor_row += 1;
-                    *cursor_col = (*cursor_col).min(lines[*cursor_row].len());
+                    *cursor_col = (*cursor_col).min(lines[*cursor_row].chars().count());
                 }
             }
             KeyCode::Left => {
@@ -681,7 +697,7 @@ fn handle_dialog_key<P: PtyPort, S: ScreenPort>(
             }
             KeyCode::Right => {
                 let lines: Vec<&str> = text.split('\n').collect();
-                if !lines.is_empty() && *cursor_col < lines[*cursor_row].len() {
+                if !lines.is_empty() && *cursor_col < lines[*cursor_row].chars().count() {
                     *cursor_col += 1;
                 }
             }

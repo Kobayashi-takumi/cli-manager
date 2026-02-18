@@ -3,6 +3,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 /// Calculate a centered rectangle within the given area
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
@@ -43,7 +44,11 @@ pub fn render_create_dialog(frame: &mut Frame, input: &str, cursor_pos: usize) {
     frame.render_widget(paragraph, inner);
 
     // Set cursor position within the input field
-    let cursor_x = inner.x + 8 + cursor_pos as u16; // "  Name: " = 8 chars
+    // cursor_pos is a char count; compute display width of text before cursor
+    let display_width: usize = input.chars().take(cursor_pos)
+        .collect::<String>()
+        .width();
+    let cursor_x = inner.x + 8 + display_width as u16; // "  Name: " = 8 chars
     let cursor_y = inner.y + 1; // Line 2 (0-indexed line 1)
     frame.set_cursor_position((cursor_x, cursor_y));
 }
@@ -78,7 +83,11 @@ pub fn render_rename_dialog(frame: &mut Frame, input: &str, cursor_pos: usize) {
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
 
-    let cursor_x = inner.x + 8 + cursor_pos as u16;
+    // cursor_pos is a char count; compute display width of text before cursor
+    let display_width: usize = input.chars().take(cursor_pos)
+        .collect::<String>()
+        .width();
+    let cursor_x = inner.x + 8 + display_width as u16;
     let cursor_y = inner.y + 1;
     frame.set_cursor_position((cursor_x, cursor_y));
 }
