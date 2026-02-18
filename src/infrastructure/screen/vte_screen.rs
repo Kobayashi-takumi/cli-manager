@@ -1085,6 +1085,11 @@ impl ScreenPort for VteScreenAdapter {
         // VteScreenAdapter does not track cursor style
         Ok(CursorStyle::DefaultUserShape)
     }
+
+    fn drain_pending_responses(&mut self, _id: TerminalId) -> Result<Vec<Vec<u8>>, AppError> {
+        // VteScreenAdapter does not handle DSR queries
+        Ok(vec![])
+    }
 }
 
 #[cfg(test)]

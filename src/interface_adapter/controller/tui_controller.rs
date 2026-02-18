@@ -299,6 +299,10 @@ mod tests {
         fn get_cursor_style(&self, _id: TerminalId) -> Result<CursorStyle, AppError> {
             Ok(CursorStyle::DefaultUserShape)
         }
+
+        fn drain_pending_responses(&mut self, _id: TerminalId) -> Result<Vec<Vec<u8>>, AppError> {
+            Ok(vec![])
+        }
     }
 
     // =========================================================================

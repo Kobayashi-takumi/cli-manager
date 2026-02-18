@@ -86,6 +86,12 @@ impl<P: PtyPort, S: ScreenPort> TerminalUsecase<P, S> {
             match self.pty_port.read(id) {
                 Ok(data) if !data.is_empty() => {
                     self.screen_port.process(id, &data)?;
+                    // Write back any synthesized terminal responses (e.g., DSR cursor position)
+                    if let Ok(responses) = self.screen_port.drain_pending_responses(id) {
+                        for response in responses {
+                            let _ = self.pty_port.write(id, &response);
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(_) => {
@@ -435,6 +441,10 @@ mod tests {
 
         fn get_cursor_style(&self, _id: TerminalId) -> Result<CursorStyle, AppError> {
             Ok(CursorStyle::DefaultUserShape)
+        }
+
+        fn drain_pending_responses(&mut self, _id: TerminalId) -> Result<Vec<Vec<u8>>, AppError> {
+            Ok(vec![])
         }
     }
 

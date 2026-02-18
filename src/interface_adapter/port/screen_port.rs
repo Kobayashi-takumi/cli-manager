@@ -57,4 +57,8 @@ pub trait ScreenPort: Send + Sync {
 
     /// Get the current cursor style/shape (set by DECSCUSR: CSI Ps SP q).
     fn get_cursor_style(&self, id: TerminalId) -> Result<CursorStyle, AppError>;
+
+    /// Drain and return any pending terminal responses (e.g., DSR cursor position replies).
+    /// These bytes should be written back to the PTY stdin.
+    fn drain_pending_responses(&mut self, id: TerminalId) -> Result<Vec<Vec<u8>>, AppError>;
 }

@@ -13,6 +13,9 @@ struct Vt100Callbacks {
     cwd: Option<String>,
     notifications: Vec<NotificationEvent>,
     cursor_style: CursorStyle,
+    /// Flag set by unhandled_csi when CSI 6 n (DSR cursor position query) is received.
+    /// Checked after process() to synthesize the response with actual cursor position.
+    pending_dsr: bool,
 }
 
 impl vt100::Callbacks for Vt100Callbacks {
@@ -52,6 +55,18 @@ impl vt100::Callbacks for Vt100Callbacks {
                 6 => CursorStyle::SteadyBar,
                 _ => CursorStyle::DefaultUserShape,
             };
+        }
+
+        // DSR: CSI 6 n — Device Status Report (cursor position query)
+        // The child process expects a CSI row;col R response on its stdin.
+        if c == 'n' && i1.is_none() {
+            let ps = params.first()
+                .and_then(|p| p.first())
+                .copied()
+                .unwrap_or(0);
+            if ps == 6 {
+                self.pending_dsr = true;
+            }
         }
     }
 
@@ -96,6 +111,8 @@ struct Vt100Instance {
     new_output_while_scrolled: bool,
     /// Cached max scrollback value (updated in `&mut self` methods).
     cached_max_scrollback: usize,
+    /// Pending responses to be written back to the PTY (e.g., DSR cursor position replies).
+    pending_responses: Vec<Vec<u8>>,
 }
 
 /// ScreenPort implementation backed by the `vt100` crate.
@@ -194,6 +211,7 @@ impl ScreenPort for Vt100ScreenAdapter {
             cached_cells,
             new_output_while_scrolled: false,
             cached_max_scrollback: 0,
+            pending_responses: Vec::new(),
         });
         Ok(())
     }
@@ -207,6 +225,13 @@ impl ScreenPort for Vt100ScreenAdapter {
         inst.parser.process(data);
         if was_scrolled {
             inst.new_output_while_scrolled = true;
+        }
+        // Synthesize DSR cursor position response if requested by child process
+        if inst.parser.callbacks().pending_dsr {
+            let pos = inst.parser.screen().cursor_position();
+            let response = format!("\x1b[{};{}R", pos.0 + 1, pos.1 + 1);
+            inst.pending_responses.push(response.into_bytes());
+            inst.parser.callbacks_mut().pending_dsr = false;
         }
         update_max_scrollback(inst);
         rebuild_cell_cache(&inst.parser, &mut inst.cached_cells);
@@ -326,6 +351,14 @@ impl ScreenPort for Vt100ScreenAdapter {
             .get(&id)
             .map(|inst| inst.parser.callbacks().cursor_style)
             .ok_or(AppError::ScreenNotFound(id))
+    }
+
+    fn drain_pending_responses(&mut self, id: TerminalId) -> Result<Vec<Vec<u8>>, AppError> {
+        let inst = self
+            .instances
+            .get_mut(&id)
+            .ok_or(AppError::ScreenNotFound(id))?;
+        Ok(std::mem::take(&mut inst.pending_responses))
     }
 }
 
@@ -1472,5 +1505,90 @@ mod tests {
         adapter.process(id(2), b"\x1b[2 q").unwrap();
         assert_eq!(adapter.get_cursor_style(id(1)).unwrap(), CursorStyle::BlinkingBar);
         assert_eq!(adapter.get_cursor_style(id(2)).unwrap(), CursorStyle::SteadyBlock);
+    }
+
+    // ─── DSR (Device Status Report) response tests ───
+
+    #[test]
+    fn dsr_query_generates_cursor_position_response() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        // CSI 6 n — cursor position query
+        adapter.process(id(1), b"\x1b[6n").unwrap();
+        let responses = adapter.drain_pending_responses(id(1)).unwrap();
+        assert_eq!(responses.len(), 1);
+        // Cursor at (0,0) → 1-indexed response: ESC[1;1R
+        assert_eq!(responses[0], b"\x1b[1;1R");
+    }
+
+    #[test]
+    fn dsr_query_after_cursor_move() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        // Move cursor to row 5, col 10 (1-indexed), then DSR query
+        adapter.process(id(1), b"\x1b[5;10H\x1b[6n").unwrap();
+        let responses = adapter.drain_pending_responses(id(1)).unwrap();
+        assert_eq!(responses.len(), 1);
+        // Cursor at (4,9) 0-indexed → 1-indexed response: ESC[5;10R
+        assert_eq!(responses[0], b"\x1b[5;10R");
+    }
+
+    #[test]
+    fn dsr_drain_clears_queue() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"\x1b[6n").unwrap();
+
+        let responses = adapter.drain_pending_responses(id(1)).unwrap();
+        assert_eq!(responses.len(), 1);
+
+        // Second drain should return empty
+        let responses2 = adapter.drain_pending_responses(id(1)).unwrap();
+        assert!(responses2.is_empty());
+    }
+
+    #[test]
+    fn dsr_no_query_returns_empty() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"Hello").unwrap();
+        let responses = adapter.drain_pending_responses(id(1)).unwrap();
+        assert!(responses.is_empty());
+    }
+
+    #[test]
+    fn dsr_nonexistent_returns_error() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        assert!(adapter.drain_pending_responses(id(99)).is_err());
+    }
+
+    #[test]
+    fn dsr_independent_per_terminal() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.create(id(2), default_size()).unwrap();
+
+        // Move terminal 2 cursor to (3,5), then DSR on both
+        adapter.process(id(2), b"\x1b[4;6H").unwrap();
+        adapter.process(id(1), b"\x1b[6n").unwrap();
+        adapter.process(id(2), b"\x1b[6n").unwrap();
+
+        let r1 = adapter.drain_pending_responses(id(1)).unwrap();
+        let r2 = adapter.drain_pending_responses(id(2)).unwrap();
+        assert_eq!(r1.len(), 1);
+        assert_eq!(r2.len(), 1);
+        assert_eq!(r1[0], b"\x1b[1;1R"); // terminal 1: cursor at (0,0)
+        assert_eq!(r2[0], b"\x1b[4;6R"); // terminal 2: cursor at (3,5)
+    }
+
+    #[test]
+    fn dsr_after_text_output() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        // Write "Hello" then DSR — cursor should be at (0,5)
+        adapter.process(id(1), b"Hello\x1b[6n").unwrap();
+        let responses = adapter.drain_pending_responses(id(1)).unwrap();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0], b"\x1b[1;6R");
     }
 }
