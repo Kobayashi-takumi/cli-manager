@@ -10,6 +10,7 @@ TUI ベースのターミナルマルチプレクサ。複数の CLI プロセ�
 - [クイックスタート](#クイックスタート)
 - [操作方法](#操作方法)
   - [キーバインド一覧](#キーバインド一覧)
+  - [ミニターミナル](#ミニターミナル)
   - [プレフィックスキーの仕組み](#プレフィックスキーの仕組み)
 - [UI レイアウト](#ui-レイアウト)
 - [ターミナルのライフサイクル](#ターミナルのライフサイクル)
@@ -45,6 +46,7 @@ TUI ベースのターミナルマルチプレクサ。複数の CLI プロセ�
 | リネーム | ターミナル名を後から変更可能 |
 | メモ | 各ターミナルに複数行メモを付与・編集。サイドバーに `[≡]` インジケータ表示 |
 | ヘルプオーバーレイ | `Ctrl+b` → `?` でキーバインド一覧をオーバーレイ表示 |
+| ミニターミナル | フッター型クイックシェル。`` Ctrl+b `` → `` ` `` でトグル。スクロールバック対応 |
 
 ## 必要環境
 
@@ -98,6 +100,7 @@ cargo run
 | `Ctrl+b` → `[` | スクロールバックモードに入る |
 | `Ctrl+b` → `r` | アクティブターミナルをリネーム |
 | `Ctrl+b` → `m` | メモを編集 |
+| `Ctrl+b` → `` ` `` | ミニターミナルのトグル（開く/閉じる/フォーカス切替） |
 | `Ctrl+b` → `?` | ヘルプオーバーレイを表示 |
 | `Ctrl+b` → `q` | アプリケーション終了 |
 | その他のキー | アクティブターミナルの stdin へパススルー |
@@ -136,6 +139,16 @@ cargo run
 
 メモが存在するターミナルにはサイドバーに `[≡]` インジケータが表示されます。メモはセッション中のみ保持されます。
 
+#### ミニターミナル
+
+`Ctrl+b` → `` ` `` でフッター領域にミニターミナルを開きます。メインターミナルを操作しながら、ちょっとしたコマンドを実行するのに便利です。
+
+- **3 ステートトグル:** 1 回目で開く → 2 回目でメインにフォーカスを戻す → 3 回目で閉じる
+- **独立した PTY:** メインターミナルとは別のシェルセッション（`$SHELL` を起動）
+- **スクロールバック対応:** `Ctrl+b` → `[` でスクロールバックモードに入り、メインと同じキーバインドで履歴を閲覧可能
+- **OSC 7 CWD:** ミニターミナルも動的 CWD に対応
+- **自動クリーンアップ:** ミニターミナル内のプロセスが終了すると自動的に閉じる
+
 #### ヘルプオーバーレイ
 
 `Ctrl+b` → `?` でヘルプオーバーレイが表示されます。全キーバインドを TERMINAL / NAVIGATION / SCROLLBACK / GENERAL の 4 カテゴリに分類して一覧表示します。`?` または `Esc` で閉じます。
@@ -153,7 +166,10 @@ stateDiagram-v2
     PrefixWait --> DialogInput : r 押下 (リネーム)
     PrefixWait --> MemoEdit : m 押下 (メモ編集)
     PrefixWait --> HelpView : ? 押下 (ヘルプ)
+    PrefixWait --> MiniTerminalInput : ` 押下 (ミニターミナル)
     HelpView --> Normal : ? / Esc 押下
+    MiniTerminalInput --> Normal : Ctrl+b → ` (閉じる)
+    MiniTerminalInput --> PrefixWait : Ctrl+b 押下
     PrefixWait --> Normal : 1秒タイムアウト\n(Ctrl+b を子プロセスへ送信)
     PrefixWait --> Normal : Ctrl+b 再押下\n(Ctrl+b を子プロセスへ送信)
     ScrollbackMode --> Normal : Esc / q 押下
@@ -168,7 +184,7 @@ stateDiagram-v2
 
 ## UI レイアウト
 
-2 ペイン構成のインターフェースです。
+2 ペイン構成のインターフェースです。`Ctrl+b` → `` ` `` でフッター領域にミニターミナルが追加されます。
 
 ```
 ┌───────────────────────┬────────────────────────────────────┐
@@ -188,9 +204,14 @@ stateDiagram-v2
 │                       │                                    │
 │───────────────────────│                                    │
 │ ^b ?:Help q:Quit      │ $ _                                │
-│                       │                                    │
+│                       ├────────────────────────────────────┤
+│                       │ Mini Terminal          ~/projects  │
+│                       │ $ git status                       │
+│                       │ On branch main                     │
+│                       │ $ _                                │
 └───────────────────────┴────────────────────────────────────┘
   ← サイドバー (25文字) →  ← メインペイン (残り幅) →
+                                  ↑ ミニターミナル (高さ10行)
 ```
 
 ```mermaid
@@ -210,6 +231,7 @@ block-beta
         G["アクティブターミナル出力"]
         H["ANSI カラー / 256 色対応"]
         I["ワイド文字・カーソル表示"]
+        J["ミニターミナル (高さ10行)"]
     end
 ```
 
@@ -271,7 +293,7 @@ graph TD
         VT100["Vt100ScreenAdapter<br/>(vt100)"]
         TUI["TUI<br/>(ratatui + crossterm)"]
         INPUT["InputHandler"]
-        WIDGETS["Widgets<br/>(sidebar, terminal_view,<br/>dialog, memo_overlay,<br/>help_overlay)"]
+        WIDGETS["Widgets<br/>(sidebar, terminal_view,<br/>mini_terminal_view, dialog,<br/>memo_overlay, help_overlay)"]
         NOTIF["MacOsNotifier<br/>(notify-rust)"]
     end
 
@@ -424,6 +446,7 @@ src/
 │   │       ├── layout.rs                # 2ペインレイアウト
 │   │       ├── sidebar.rs               # サイドバー (ターミナル一覧 + 通知マーク)
 │   │       ├── terminal_view.rs         # メインペイン (出力表示 + ワイド文字)
+│   │       ├── mini_terminal_view.rs   # ミニターミナル (フッター型クイックシェル)
 │   │       ├── dialog.rs                # 確認・リネームダイアログ
 │   │       ├── memo_overlay.rs          # メモ編集オーバーレイ
 │   │       └── help_overlay.rs          # ヘルプオーバーレイ
@@ -444,7 +467,7 @@ cargo check
 # ビルド
 cargo build
 
-# テスト（全 600 件）
+# テスト（全 769 件）
 cargo test
 
 # 特定のテストのみ実行
@@ -456,40 +479,42 @@ cargo clippy
 
 ### テスト構成
 
-合計 **600** ユニットテスト。各モジュールごとの内訳は以下の通りです。
+合計 **769** ユニットテスト。各モジュールごとの内訳は以下の通りです。
 
 ```mermaid
-pie title ユニットテスト構成 (600件)
+pie title ユニットテスト構成 (769件)
     "VteScreenAdapter (177)" : 177
-    "InputHandler (87)" : 87
-    "Vt100ScreenAdapter (85)" : 85
-    "TerminalUsecase (58)" : 58
-    "TuiController (33)" : 33
+    "Vt100ScreenAdapter (103)" : 103
+    "AppRunner (99)" : 99
+    "InputHandler (95)" : 95
+    "TerminalUsecase (61)" : 61
+    "TuiController (37)" : 37
     "Sidebar (32)" : 32
-    "TerminalView (30)" : 30
+    "MiniTerminalView (31)" : 31
+    "TerminalView (31)" : 31
     "ManagedTerminal (17)" : 17
     "MacOsNotifier (17)" : 17
-    "NotificationEvent (15)" : 15
-    "HelpOverlay (14)" : 14
-    "その他 (35)" : 35
+    "その他 (69)" : 69
 ```
 
 | モジュール | テスト数 | テスト対象 |
 |-----------|---------|-----------|
 | `VteScreenAdapter` | 177 | ANSI パース、セルグリッド、カーソル移動、代替画面、スクロールリージョン、ワイド文字、OSC タイトル、通知 |
-| `Vt100ScreenAdapter` | 85 | vt100 ベースパース、セル属性、OSC 7 CWD、OSC タイトル、通知、スクロールバック |
-| `InputHandler` | 87 | ステートマシン、プレフィックスキー、タイムアウト、アプリケーションカーソルキー、ブラケットペースト、スクロールバックモード、メモ編集モード、ヘルプ表示 |
-| `TerminalUsecase` | 58 | CRUD 操作、ポーリング、通知収集、リネーム、メモ操作、エラーハンドリング |
-| `TuiController` | 33 | AppAction ディスパッチ、状態管理、リネーム・メモ・ヘルプ操作 |
+| `Vt100ScreenAdapter` | 103 | vt100 ベースパース、セル属性、OSC 7 CWD、OSC タイトル、通知、スクロールバック、カーソルスタイル、DSR 応答 |
+| `AppRunner` | 99 | イベントループシミュレーション、スクロールバック（メイン/ミニ）、フォーカス制御、ミニターミナル管理 |
+| `InputHandler` | 95 | ステートマシン、プレフィックスキー、タイムアウト、アプリケーションカーソルキー、ブラケットペースト、スクロールバックモード、メモ編集モード、ヘルプ表示、ミニターミナル入力 |
+| `TerminalUsecase` | 61 | CRUD 操作、ポーリング、通知収集、リネーム、メモ操作、エラーハンドリング |
+| `TuiController` | 37 | AppAction ディスパッチ、状態管理、リネーム・メモ・ヘルプ・ミニターミナル操作 |
 | `Sidebar` | 32 | ターミナル一覧描画、動的 CWD 表示、通知マーク、メモインジケータ |
-| `TerminalView` | 30 | 出力表示、ワイド文字クリッピング、カーソル位置、スクロールバック表示 |
+| `MiniTerminalView` | 31 | ミニターミナル描画、セルグリッド、ワイド文字、カーソル位置、スクロールバック表示 |
+| `TerminalView` | 31 | 出力表示、ワイド文字クリッピング、カーソル位置、スクロールバック表示 |
 | `ManagedTerminal` | 17 | エンティティ操作、通知フラグ、リネーム、メモ |
 | `MacOsNotifier` | 17 | デスクトップ通知送信、レート制限 |
 | `NotificationEvent` | 15 | Bell/Osc9/Osc777 イベント |
-| `HelpOverlay` | 14 | ヘルプオーバーレイ描画、カテゴリ表示、キーバインド一覧、小画面対応 |
+| `HelpOverlay` | 15 | ヘルプオーバーレイ描画、カテゴリ表示、キーバインド一覧、小画面対応 |
 | `Dialog` | 11 | 確認・リネームダイアログ描画 |
+| `Layout` | 10 | 2ペインレイアウト計算、ミニターミナル分割 |
 | `OSC 7 Parser` | 10 | URI パース、パーセントデコード |
-| `Layout` | 6 | 2ペインレイアウト計算 |
 | `Cell` | 5 | セル属性、色 |
 | `MemoOverlay` | 3 | メモ編集オーバーレイ描画 |
 
