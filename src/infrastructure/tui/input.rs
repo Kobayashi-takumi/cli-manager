@@ -18,6 +18,7 @@ pub enum InputMode {
     DialogInput,
     ScrollbackMode,
     MemoEdit,
+    HelpView,
 }
 
 /// Converts crossterm `KeyEvent`s into `AppAction`s using a prefix-key state
@@ -72,6 +73,7 @@ impl InputHandler {
             InputMode::DialogInput => None,
             InputMode::ScrollbackMode => self.handle_scrollback(key),
             InputMode::MemoEdit => None,
+            InputMode::HelpView => None,
         }
     }
 
@@ -146,6 +148,7 @@ impl InputHandler {
                 Some(AppAction::RenameTerminal { name: String::new() })
             }
             KeyCode::Char('m') if key.modifiers.is_empty() => Some(AppAction::OpenMemo),
+            KeyCode::Char('?') if key.modifiers.is_empty() => Some(AppAction::ShowHelp),
             // Ctrl+b again -> send literal Ctrl+b to child process
             KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(AppAction::WriteToActive(vec![0x02]))
@@ -1316,5 +1319,49 @@ mod tests {
 
         handler.handle_key(make_key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(handler.mode(), InputMode::MemoEdit));
+    }
+
+    // =========================================================================
+    // Tests: HelpView mode (Phase 12)
+    // =========================================================================
+
+    #[test]
+    fn prefix_question_mark_produces_show_help() {
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        let key = make_key(KeyCode::Char('?'), KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+
+        assert!(matches!(action, Some(AppAction::ShowHelp)));
+        assert_normal(&handler);
+    }
+
+    #[test]
+    fn help_view_mode_returns_none_for_any_key() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::HelpView);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn help_view_mode_stays_in_mode() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::HelpView);
+
+        handler.handle_key(make_key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(matches!(handler.mode(), InputMode::HelpView));
+    }
+
+    #[test]
+    fn help_view_mode_ignores_ctrl_b() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::HelpView);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(action.is_none());
+        assert!(matches!(handler.mode(), InputMode::HelpView));
     }
 }

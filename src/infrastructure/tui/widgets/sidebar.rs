@@ -93,7 +93,7 @@ pub fn render(
     // Split inner into content area (scrollable) and help area (fixed at bottom)
     let chunks = Layout::vertical([
         Constraint::Min(0),    // content area
-        Constraint::Length(2), // help hints (always visible)
+        Constraint::Length(1), // help hints (always visible)
     ])
     .split(inner);
     let content_area = chunks[0];
@@ -171,18 +171,12 @@ pub fn render(
         );
     }
 
-    // Help hints (always visible in fixed area)
-    let help_lines = vec![
-        Line::from(Span::styled(
-            "^b c:New d:Del o:Pane q:Quit",
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-        Line::from(Span::styled(
-            "\u{2191}\u{2193}:Sel",
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-    ];
-    let help_paragraph = Paragraph::new(help_lines);
+    // Help hint (always visible in fixed area)
+    let help_line = Line::from(Span::styled(
+        "^b ?:Help q:Quit",
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    let help_paragraph = Paragraph::new(help_line);
     frame.render_widget(help_paragraph, help_area);
 }
 
@@ -304,12 +298,10 @@ mod tests {
             .unwrap();
 
         let buf = terminal.backend().buffer();
-        // Help hints should be near the bottom of the area
-        // Last two rows inside the block border (row 18 and 17, since row 19 is bottom border)
-        let help_row1: String = (0..30).map(|x| buf[(x, 17)].symbol().chars().next().unwrap_or(' ')).collect();
-        let help_row2: String = (0..30).map(|x| buf[(x, 18)].symbol().chars().next().unwrap_or(' ')).collect();
-        assert!(help_row1.contains("^b c:New"), "Expected help hint in row17, got: {}", help_row1);
-        assert!(help_row2.contains("Sel"), "Expected help hint in row18, got: {}", help_row2);
+        // Help hint should be in the last row inside the block border (row 18, since row 19 is bottom border)
+        let help_row: String = (0..30).map(|x| buf[(x, 18)].symbol().chars().next().unwrap_or(' ')).collect();
+        assert!(help_row.contains("?:Help"), "Expected '?:Help' in help hint, got: {}", help_row);
+        assert!(help_row.contains("q:Quit"), "Expected 'q:Quit' in help hint, got: {}", help_row);
     }
 
     #[test]
@@ -498,22 +490,19 @@ mod tests {
             .unwrap();
 
         let buf = terminal.backend().buffer();
-        // Help hints should be in the last 2 rows inside the border (rows 9 and 10, border at 11)
-        let help_row1: String = (0..30)
-            .map(|x| buf[(x, 9)].symbol().chars().next().unwrap_or(' '))
-            .collect();
-        let help_row2: String = (0..30)
+        // Help hint should be in the last row inside the border (row 10, border at 11)
+        let help_row: String = (0..30)
             .map(|x| buf[(x, 10)].symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(
-            help_row1.contains("^b c:New"),
-            "Expected help hint when scrolling, got: {}",
-            help_row1
+            help_row.contains("?:Help"),
+            "Expected '?:Help' hint when scrolling, got: {}",
+            help_row
         );
         assert!(
-            help_row2.contains("Sel"),
-            "Expected help hint when scrolling, got: {}",
-            help_row2
+            help_row.contains("q:Quit"),
+            "Expected 'q:Quit' hint when scrolling, got: {}",
+            help_row
         );
     }
 

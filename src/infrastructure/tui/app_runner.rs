@@ -14,7 +14,7 @@ use ratatui::backend::CrosstermBackend;
 use crate::domain::primitive::TerminalSize;
 use crate::infrastructure::notification::MacOsNotifier;
 use crate::infrastructure::tui::input::{InputHandler, InputMode};
-use crate::infrastructure::tui::widgets::{dialog, layout, memo_overlay, sidebar, terminal_view};
+use crate::infrastructure::tui::widgets::{dialog, help_overlay, layout, memo_overlay, sidebar, terminal_view};
 use crate::interface_adapter::controller::tui_controller::{AppAction, TuiController};
 use crate::interface_adapter::port::{PtyPort, ScreenPort};
 
@@ -32,6 +32,7 @@ enum DialogState {
     ConfirmClose { terminal_name: String, is_running: bool },
     Rename { input: String, cursor_pos: usize },
     MemoEdit { text: String, cursor_row: usize, cursor_col: usize },
+    Help,
 }
 
 /// Main TUI event loop.
@@ -93,7 +94,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
 
             // Compute sidebar scroll offset before rendering
             let sidebar_inner_height = areas.sidebar.height.saturating_sub(2); // minus top/bottom border
-            let content_height = sidebar_inner_height.saturating_sub(2); // minus help area (2 lines)
+            let content_height = sidebar_inner_height.saturating_sub(1); // minus help area (1 line)
             *sidebar_scroll_offset = sidebar::compute_scroll_offset(
                 controller.usecase().get_terminals().len(),
                 controller.usecase().get_active_index(),
@@ -182,6 +183,9 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                         *cursor_row,
                         *cursor_col,
                     );
+                }
+                DialogState::Help => {
+                    help_overlay::render_help_overlay(frame, frame.area());
                 }
                 DialogState::None => {}
             }
@@ -463,6 +467,11 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                 input_handler.set_mode(InputMode::MemoEdit);
             }
         }
+        AppAction::ShowHelp => {
+            exit_scrollback_if_active(controller, input_handler, in_scrollback);
+            *dialog = DialogState::Help;
+            input_handler.set_mode(InputMode::HelpView);
+        }
         other => {
             match controller.dispatch(other, size) {
                 Ok(()) => {}
@@ -655,6 +664,13 @@ fn handle_dialog_key<P: PtyPort, S: ScreenPort>(
                 input_handler.set_mode(InputMode::Normal);
             }
             _ => {}
+        },
+        DialogState::Help => match key.code {
+            KeyCode::Char('?') | KeyCode::Esc => {
+                *dialog = DialogState::None;
+                input_handler.set_mode(InputMode::Normal);
+            }
+            _ => {} // Help is read-only; ignore all other keys
         },
         DialogState::None => {}
     }

@@ -29,6 +29,7 @@ pub enum AppAction {
     RenameTerminal { name: String },
     OpenMemo,
     SaveMemo { text: String },
+    ShowHelp,
 }
 
 /// Thin controller that translates `AppAction`s into usecase calls.
@@ -92,6 +93,7 @@ impl<P: PtyPort, S: ScreenPort> TuiController<P, S> {
                 self.usecase.set_active_memo(text)?;
             }
             AppAction::OpenMemo => {} // Handled by caller (app_runner)
+            AppAction::ShowHelp => {} // Handled by caller (app_runner)
         }
         Ok(())
     }
@@ -910,6 +912,19 @@ mod tests {
         let size = default_size();
 
         let result = ctrl.dispatch(AppAction::OpenMemo, size);
+        assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // Tests: dispatch(ShowHelp)
+    // =========================================================================
+
+    #[test]
+    fn dispatch_show_help_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+
+        let result = ctrl.dispatch(AppAction::ShowHelp, size);
         assert!(result.is_ok());
     }
 }

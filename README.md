@@ -44,6 +44,7 @@ TUI ベースのターミナルマルチプレクサ。複数の CLI プロセ�
 | スクロールバック | 出力履歴を vim ライクなキーバインドでスクロール閲覧（10,000 行バッファ） |
 | リネーム | ターミナル名を後から変更可能 |
 | メモ | 各ターミナルに複数行メモを付与・編集。サイドバーに `[≡]` インジケータ表示 |
+| ヘルプオーバーレイ | `Ctrl+b` → `?` でキーバインド一覧をオーバーレイ表示 |
 
 ## 必要環境
 
@@ -97,6 +98,7 @@ cargo run
 | `Ctrl+b` → `[` | スクロールバックモードに入る |
 | `Ctrl+b` → `r` | アクティブターミナルをリネーム |
 | `Ctrl+b` → `m` | メモを編集 |
+| `Ctrl+b` → `?` | ヘルプオーバーレイを表示 |
 | `Ctrl+b` → `q` | アプリケーション終了 |
 | その他のキー | アクティブターミナルの stdin へパススルー |
 
@@ -134,6 +136,10 @@ cargo run
 
 メモが存在するターミナルにはサイドバーに `[≡]` インジケータが表示されます。メモはセッション中のみ保持されます。
 
+#### ヘルプオーバーレイ
+
+`Ctrl+b` → `?` でヘルプオーバーレイが表示されます。全キーバインドを TERMINAL / NAVIGATION / SCROLLBACK / GENERAL の 4 カテゴリに分類して一覧表示します。`?` または `Esc` で閉じます。
+
 ### プレフィックスキーの仕組み
 
 `Ctrl+b` は tmux と同じプレフィックスキーです。InputHandler が以下のステートマシンで管理します。
@@ -146,6 +152,8 @@ stateDiagram-v2
     PrefixWait --> ScrollbackMode : [ 押下
     PrefixWait --> DialogInput : r 押下 (リネーム)
     PrefixWait --> MemoEdit : m 押下 (メモ編集)
+    PrefixWait --> HelpView : ? 押下 (ヘルプ)
+    HelpView --> Normal : ? / Esc 押下
     PrefixWait --> Normal : 1秒タイムアウト\n(Ctrl+b を子プロセスへ送信)
     PrefixWait --> Normal : Ctrl+b 再押下\n(Ctrl+b を子プロセスへ送信)
     ScrollbackMode --> Normal : Esc / q 押下
@@ -179,8 +187,8 @@ stateDiagram-v2
 │   exited (0)          │                                    │
 │                       │                                    │
 │───────────────────────│                                    │
-│ ^b c:New d:Close      │ $ _                                │
-│ ↑↓:Sel                │                                    │
+│ ^b ?:Help q:Quit      │ $ _                                │
+│                       │                                    │
 └───────────────────────┴────────────────────────────────────┘
   ← サイドバー (25文字) →  ← メインペイン (残り幅) →
 ```
@@ -263,7 +271,7 @@ graph TD
         VT100["Vt100ScreenAdapter<br/>(vt100)"]
         TUI["TUI<br/>(ratatui + crossterm)"]
         INPUT["InputHandler"]
-        WIDGETS["Widgets<br/>(sidebar, terminal_view,<br/>dialog, memo_overlay)"]
+        WIDGETS["Widgets<br/>(sidebar, terminal_view,<br/>dialog, memo_overlay,<br/>help_overlay)"]
         NOTIF["MacOsNotifier<br/>(notify-rust)"]
     end
 
@@ -417,7 +425,8 @@ src/
 │   │       ├── sidebar.rs               # サイドバー (ターミナル一覧 + 通知マーク)
 │   │       ├── terminal_view.rs         # メインペイン (出力表示 + ワイド文字)
 │   │       ├── dialog.rs                # 確認・リネームダイアログ
-│   │       └── memo_overlay.rs          # メモ編集オーバーレイ
+│   │       ├── memo_overlay.rs          # メモ編集オーバーレイ
+│   │       └── help_overlay.rs          # ヘルプオーバーレイ
 │   └── notification/
 │       └── macos_notifier.rs            # macOS デスクトップ通知 (notify-rust)
 └── shared/
@@ -435,7 +444,7 @@ cargo check
 # ビルド
 cargo build
 
-# テスト（全 581 件）
+# テスト（全 600 件）
 cargo test
 
 # 特定のテストのみ実行
@@ -447,40 +456,42 @@ cargo clippy
 
 ### テスト構成
 
-合計 **581** ユニットテスト。各モジュールごとの内訳は以下の通りです。
+合計 **600** ユニットテスト。各モジュールごとの内訳は以下の通りです。
 
 ```mermaid
-pie title ユニットテスト構成 (581件)
-    "VteScreenAdapter (176)" : 176
+pie title ユニットテスト構成 (600件)
+    "VteScreenAdapter (177)" : 177
+    "InputHandler (87)" : 87
     "Vt100ScreenAdapter (85)" : 85
-    "InputHandler (83)" : 83
-    "TerminalUsecase (56)" : 56
+    "TerminalUsecase (58)" : 58
+    "TuiController (33)" : 33
     "Sidebar (32)" : 32
     "TerminalView (30)" : 30
-    "TuiController (31)" : 31
     "ManagedTerminal (17)" : 17
-    "MacOsNotifier (16)" : 16
+    "MacOsNotifier (17)" : 17
     "NotificationEvent (15)" : 15
-    "その他 (40)" : 40
+    "HelpOverlay (14)" : 14
+    "その他 (35)" : 35
 ```
 
 | モジュール | テスト数 | テスト対象 |
 |-----------|---------|-----------|
-| `VteScreenAdapter` | 176 | ANSI パース、セルグリッド、カーソル移動、代替画面、スクロールリージョン、ワイド文字、OSC タイトル、通知 |
+| `VteScreenAdapter` | 177 | ANSI パース、セルグリッド、カーソル移動、代替画面、スクロールリージョン、ワイド文字、OSC タイトル、通知 |
 | `Vt100ScreenAdapter` | 85 | vt100 ベースパース、セル属性、OSC 7 CWD、OSC タイトル、通知、スクロールバック |
-| `InputHandler` | 83 | ステートマシン、プレフィックスキー、タイムアウト、アプリケーションカーソルキー、ブラケットペースト、スクロールバックモード、メモ編集モード |
-| `TerminalUsecase` | 56 | CRUD 操作、ポーリング、通知収集、リネーム、メモ操作、エラーハンドリング |
+| `InputHandler` | 87 | ステートマシン、プレフィックスキー、タイムアウト、アプリケーションカーソルキー、ブラケットペースト、スクロールバックモード、メモ編集モード、ヘルプ表示 |
+| `TerminalUsecase` | 58 | CRUD 操作、ポーリング、通知収集、リネーム、メモ操作、エラーハンドリング |
+| `TuiController` | 33 | AppAction ディスパッチ、状態管理、リネーム・メモ・ヘルプ操作 |
 | `Sidebar` | 32 | ターミナル一覧描画、動的 CWD 表示、通知マーク、メモインジケータ |
 | `TerminalView` | 30 | 出力表示、ワイド文字クリッピング、カーソル位置、スクロールバック表示 |
-| `TuiController` | 31 | AppAction ディスパッチ、状態管理、リネーム・メモ操作 |
 | `ManagedTerminal` | 17 | エンティティ操作、通知フラグ、リネーム、メモ |
-| `MacOsNotifier` | 16 | デスクトップ通知送信、レート制限 |
+| `MacOsNotifier` | 17 | デスクトップ通知送信、レート制限 |
 | `NotificationEvent` | 15 | Bell/Osc9/Osc777 イベント |
+| `HelpOverlay` | 14 | ヘルプオーバーレイ描画、カテゴリ表示、キーバインド一覧、小画面対応 |
 | `Dialog` | 11 | 確認・リネームダイアログ描画 |
 | `OSC 7 Parser` | 10 | URI パース、パーセントデコード |
-| `MemoOverlay` | 3 | メモ編集オーバーレイ描画 |
 | `Layout` | 6 | 2ペインレイアウト計算 |
 | `Cell` | 5 | セル属性、色 |
+| `MemoOverlay` | 3 | メモ編集オーバーレイ描画 |
 
 **モックパターン（スレッドセーフ）:**
 - `MockPtyPort`: `Arc<Mutex<>>` で呼び出し履歴を追跡（Send+Sync 対応）
