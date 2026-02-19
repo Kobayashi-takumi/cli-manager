@@ -33,6 +33,11 @@ pub enum AppAction {
     ToggleMiniTerminal,
     WriteToMiniTerminal(Vec<u8>),
     OpenQuickSwitcher,
+    EnterScrollbackSearch,
+    ScrollbackSearchNext,
+    ScrollbackSearchPrev,
+    ExitScrollbackSearch,
+    ConfirmScrollbackSearch,
 }
 
 /// Thin controller that translates `AppAction`s into usecase calls.
@@ -100,6 +105,11 @@ impl<P: PtyPort, S: ScreenPort> TuiController<P, S> {
             AppAction::ToggleMiniTerminal => {}    // Handled by caller (app_runner)
             AppAction::WriteToMiniTerminal(_) => {} // Handled by caller (app_runner)
             AppAction::OpenQuickSwitcher => {}     // Handled by caller (app_runner)
+            AppAction::EnterScrollbackSearch
+            | AppAction::ScrollbackSearchNext
+            | AppAction::ScrollbackSearchPrev
+            | AppAction::ExitScrollbackSearch
+            | AppAction::ConfirmScrollbackSearch => {} // Handled by caller (app_runner)
         }
         Ok(())
     }
@@ -307,6 +317,10 @@ mod tests {
         }
 
         fn drain_pending_responses(&mut self, _id: TerminalId) -> Result<Vec<Vec<u8>>, AppError> {
+            Ok(vec![])
+        }
+
+        fn search_scrollback(&mut self, _id: TerminalId, _query: &str) -> Result<Vec<SearchMatch>, AppError> {
             Ok(vec![])
         }
     }
@@ -1010,6 +1024,50 @@ mod tests {
         let mut ctrl = make_controller();
         let size = default_size();
         let result = ctrl.dispatch(AppAction::OpenQuickSwitcher, size);
+        assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // Tests: dispatch(scrollback search actions) - Task #84
+    // =========================================================================
+
+    #[test]
+    fn dispatch_enter_scrollback_search_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::EnterScrollbackSearch, size);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_scrollback_search_next_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::ScrollbackSearchNext, size);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_scrollback_search_prev_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::ScrollbackSearchPrev, size);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_exit_scrollback_search_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::ExitScrollbackSearch, size);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_confirm_scrollback_search_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::ConfirmScrollbackSearch, size);
         assert!(result.is_ok());
     }
 }

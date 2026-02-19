@@ -21,11 +21,11 @@ fn char_to_byte_index(s: &str, char_pos: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-use crate::domain::primitive::{CursorStyle, TerminalId, TerminalSize};
+use crate::domain::primitive::{CursorStyle, SearchMatch, TerminalId, TerminalSize};
 use crate::infrastructure::notification::MacOsNotifier;
 use crate::infrastructure::tui::input::{InputHandler, InputMode};
 use crate::infrastructure::tui::fuzzy_matcher;
-use crate::infrastructure::tui::widgets::{dialog, help_overlay, layout, memo_overlay, mini_terminal_view, quick_switcher, sidebar, terminal_view};
+use crate::infrastructure::tui::widgets::{dialog, help_overlay, layout, memo_overlay, mini_terminal_view, quick_switcher, search_bar, sidebar, terminal_view};
 use crate::infrastructure::tui::widgets::quick_switcher::QuickSwitchItem;
 use crate::interface_adapter::controller::tui_controller::{AppAction, TuiController};
 use crate::interface_adapter::port::{PtyPort, ScreenPort};
@@ -98,6 +98,42 @@ enum DialogState {
     QuickSwitch { query: String, cursor_pos: usize, selected_index: usize },
 }
 
+/// State for scrollback search.
+struct SearchState {
+    query: String,
+    cursor_pos: usize,
+    matches: Vec<SearchMatch>,
+    current_match_index: Option<usize>,
+    confirmed: bool,
+}
+
+impl SearchState {
+    fn new() -> Self {
+        Self {
+            query: String::new(),
+            cursor_pos: 0,
+            matches: Vec::new(),
+            current_match_index: None,
+            confirmed: false,
+        }
+    }
+
+    fn match_info(&self) -> Option<(usize, usize)> {
+        if self.matches.is_empty() {
+            if self.query.is_empty() {
+                None
+            } else {
+                Some((0, 0))
+            }
+        } else {
+            Some((
+                self.current_match_index.map(|i| i + 1).unwrap_or(0),
+                self.matches.len(),
+            ))
+        }
+    }
+}
+
 /// Main TUI event loop.
 ///
 /// Initializes crossterm raw mode + alternate screen, creates the ratatui Terminal,
@@ -118,6 +154,7 @@ pub fn run<P: PtyPort, S: ScreenPort>(mut controller: TuiController<P, S>) -> an
     let mut notifier = MacOsNotifier::new();
     let mut scrollback_target: Option<ScrollbackTarget> = None;
     let mut last_cursor_style = CursorStyle::DefaultUserShape;
+    let mut search_state: Option<SearchState> = None;
 
     // === Main loop ===
     let result = main_loop(
@@ -131,6 +168,7 @@ pub fn run<P: PtyPort, S: ScreenPort>(mut controller: TuiController<P, S>) -> an
         &mut notifier,
         &mut scrollback_target,
         &mut last_cursor_style,
+        &mut search_state,
     );
 
     // === Cleanup (always runs) ===
@@ -152,6 +190,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
     notifier: &mut MacOsNotifier,
     scrollback_target: &mut Option<ScrollbackTarget>,
     last_cursor_style: &mut CursorStyle,
+    search_state: &mut Option<SearchState>,
 ) -> anyhow::Result<()> {
     let mut mini_terminal = MiniTerminalState::new();
 
@@ -219,9 +258,74 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                     }
                     None => (None, None, true, None, None),
                 };
+            // Compute search highlights for the main terminal
+            let search_hl = if main_in_scrollback {
+                search_state.as_ref().and_then(|ss| {
+                    if ss.matches.is_empty() {
+                        return None;
+                    }
+                    let id = controller.usecase().get_active_terminal()?.id();
+                    let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                    let offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                    let visible_start = max_sb.saturating_sub(offset);
+                    let screen_rows = areas.main_pane.height.saturating_sub(1) as usize; // minus CWD bar in normal, but in scrollback mode with border it's different
+                    // In scrollback mode the content area is inner area minus CWD bar and status bar
+                    // Approximate: use areas.main_pane height minus borders (2) minus cwd (1) minus status (1) = -4
+                    let content_rows = if areas.main_pane.height >= 5 {
+                        (areas.main_pane.height - 4) as usize
+                    } else {
+                        screen_rows
+                    };
+                    let visible_end = visible_start + content_rows;
+
+                    let mut visible_matches = Vec::new();
+                    for (i, m) in ss.matches.iter().enumerate() {
+                        if m.row >= visible_start && m.row < visible_end {
+                            let display_row = m.row - visible_start;
+                            visible_matches.push((i, display_row, m.col_start, m.col_end));
+                        }
+                    }
+
+                    if visible_matches.is_empty() {
+                        return None;
+                    }
+
+                    let matches: Vec<(usize, usize, usize)> = visible_matches.iter()
+                        .map(|(_, row, cs, ce)| (*row, *cs, *ce))
+                        .collect();
+
+                    // Map current_match_index from global to local
+                    let current_local = ss.current_match_index.and_then(|ci| {
+                        visible_matches.iter().position(|(gi, _, _, _)| *gi == ci)
+                    });
+
+                    Some(terminal_view::SearchHighlights {
+                        matches,
+                        current_match_index: current_local,
+                    })
+                })
+            } else {
+                None
+            };
+
+            // If search is active during scrollback, reserve 1 row at bottom for search bar
+            let (terminal_area, search_bar_area) = if main_in_scrollback && search_state.is_some() {
+                let pane = areas.main_pane;
+                if pane.height > 2 {
+                    (
+                        Rect::new(pane.x, pane.y, pane.width, pane.height - 1),
+                        Some(Rect::new(pane.x, pane.y + pane.height - 1, pane.width, 1)),
+                    )
+                } else {
+                    (pane, None)
+                }
+            } else {
+                (areas.main_pane, None)
+            };
+
             terminal_view::render(
                 frame,
-                areas.main_pane,
+                terminal_area,
                 cells_opt,
                 cursor_opt,
                 cursor_visible,
@@ -229,7 +333,23 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                 *focus == FocusPane::Terminal,
                 scrollback_info,
                 main_in_scrollback,
+                search_hl.as_ref(),
             );
+
+            // Render search bar if active
+            if let Some(sb_area) = search_bar_area
+                && let Some(ss) = search_state.as_ref()
+            {
+                let show_cursor = !ss.confirmed;
+                search_bar::render_search_bar(
+                    frame,
+                    sb_area,
+                    &ss.query,
+                    ss.cursor_pos,
+                    ss.match_info(),
+                    show_cursor,
+                );
+            }
 
             // Mini terminal view (if visible)
             let mini_in_scrollback = *scrollback_target == Some(ScrollbackTarget::MiniTerminal);
@@ -424,6 +544,10 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                     mini_terminal.visible = false;
                     mini_terminal.spawned = false;
                     let _ = controller.usecase_mut().screen_port_mut().remove(mid);
+                    // Clear search state if searching mini terminal
+                    if search_state.is_some() && *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                        *search_state = None;
+                    }
                     // If we were scrolling the mini terminal, exit scrollback
                     if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
                         *scrollback_target = None;
@@ -441,6 +565,10 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                 mini_terminal.visible = false;
                 mini_terminal.spawned = false;
                 let _ = controller.usecase_mut().screen_port_mut().remove(mid);
+                // Clear search state if searching mini terminal
+                if search_state.is_some() && *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                    *search_state = None;
+                }
                 // If we were scrolling the mini terminal, exit scrollback
                 if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
                     *scrollback_target = None;
@@ -475,7 +603,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
             let ev = event::read()?;
             match ev {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    handle_key_event(key, controller, input_handler, should_quit, dialog, focus, size, scrollback_target, &mut mini_terminal)?;
+                    handle_key_event(key, controller, input_handler, should_quit, dialog, focus, size, scrollback_target, &mut mini_terminal, search_state)?;
                 }
                 Event::Resize(cols, rows) => {
                     let new_full = Rect::new(0, 0, cols, rows);
@@ -495,6 +623,12 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                         let mid = mini_terminal.terminal_id;
                         let _ = controller.usecase_mut().pty_port_mut().resize(mid, mini_size);
                         let _ = controller.usecase_mut().screen_port_mut().resize(mid, mini_size);
+                    }
+                    // Re-execute search after resize (row positions may have changed)
+                    if let Some(state) = search_state.as_mut() {
+                        if !state.query.is_empty() {
+                            execute_search(controller, scrollback_target, &mini_terminal, state);
+                        }
                     }
                 }
                 Event::Paste(text) => {
@@ -561,7 +695,14 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
     size: TerminalSize,
     scrollback_target: &mut Option<ScrollbackTarget>,
     mini_terminal: &mut MiniTerminalState,
+    search_state: &mut Option<SearchState>,
 ) -> anyhow::Result<()> {
+    // If in ScrollbackSearch mode, handle search bar input directly
+    if matches!(input_handler.mode(), InputMode::ScrollbackSearch) {
+        handle_search_key(key, controller, input_handler, scrollback_target, mini_terminal, search_state)?;
+        return Ok(());
+    }
+
     // If a dialog is active, handle keys in the dialog
     if !matches!(dialog, DialogState::None) {
         handle_dialog_key(key, controller, input_handler, dialog, size)?;
@@ -606,7 +747,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
 
     match action {
         AppAction::CreateTerminal { .. } => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
             *dialog = DialogState::CreateTerminal {
                 input: String::new(),
                 cursor_pos: 0,
@@ -614,7 +755,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             input_handler.set_mode(InputMode::DialogInput);
         }
         AppAction::CloseTerminal => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
             // Check if the active terminal is running
             if let Some(terminal) = controller.usecase().get_active_terminal() {
                 if terminal.status().is_running() {
@@ -633,7 +774,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             *should_quit = true;
         }
         AppAction::ToggleFocus => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
             *focus = match *focus {
                 FocusPane::Sidebar => FocusPane::Terminal,
                 FocusPane::Terminal => FocusPane::Sidebar,
@@ -641,7 +782,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             };
         }
         AppAction::SelectNext | AppAction::SelectPrev | AppAction::SelectByIndex(_) => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
             if *focus == FocusPane::MiniTerminal {
                 *focus = FocusPane::Terminal;
                 input_handler.set_mode(InputMode::Normal);
@@ -679,7 +820,47 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             }
         }
         AppAction::ExitScrollback => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal);
+            if search_state.is_some() {
+                // First Esc clears search highlights, stays in scrollback
+                *search_state = None;
+                // handle_scrollback() already set mode to Normal, restore ScrollbackMode
+                input_handler.set_mode(InputMode::ScrollbackMode);
+            } else {
+                exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
+            }
+        }
+        AppAction::EnterScrollbackSearch => {
+            if scrollback_target.is_some() {
+                *search_state = Some(SearchState::new());
+                input_handler.set_mode(InputMode::ScrollbackSearch);
+            }
+        }
+        AppAction::ScrollbackSearchNext => {
+            if let Some(state) = search_state.as_mut()
+                && state.confirmed
+                && !state.matches.is_empty()
+            {
+                let next = match state.current_match_index {
+                    Some(i) => (i + 1) % state.matches.len(),
+                    None => 0,
+                };
+                state.current_match_index = Some(next);
+                scroll_to_match(controller, scrollback_target, mini_terminal, state, next);
+            }
+        }
+        AppAction::ScrollbackSearchPrev => {
+            if let Some(state) = search_state.as_mut()
+                && state.confirmed
+                && !state.matches.is_empty()
+            {
+                let prev = match state.current_match_index {
+                    Some(0) => state.matches.len() - 1,
+                    Some(i) => i - 1,
+                    None => state.matches.len() - 1,
+                };
+                state.current_match_index = Some(prev);
+                scroll_to_match(controller, scrollback_target, mini_terminal, state, prev);
+            }
         }
         AppAction::ScrollbackUp(n) => {
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
@@ -696,7 +877,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                 let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset);
                 if new_offset == 0 {
                     // Auto-exit scrollback when reaching bottom
-                    exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal);
+                    exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
                 }
             }
         }
@@ -724,7 +905,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                 let new_offset = current.saturating_sub(page);
                 let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset);
                 if new_offset == 0 {
-                    exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal);
+                    exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
                 }
             }
         }
@@ -738,10 +919,10 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
                 let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, 0);
             }
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
         }
         AppAction::RenameTerminal { .. } => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
             if let Some(terminal) = controller.usecase().get_active_terminal() {
                 let current_name = terminal.name().to_string();
                 let cursor_pos = current_name.chars().count();
@@ -753,7 +934,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             }
         }
         AppAction::OpenMemo => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
             if let Ok(memo) = controller.usecase().get_active_memo() {
                 let text = memo.to_string();
                 let lines: Vec<&str> = text.split('\n').collect();
@@ -768,12 +949,12 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             }
         }
         AppAction::ShowHelp => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
             *dialog = DialogState::Help;
             input_handler.set_mode(InputMode::HelpView);
         }
         AppAction::ToggleMiniTerminal => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
             if !mini_terminal.spawned {
                 // First time: spawn PTY + Screen
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
@@ -816,7 +997,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             }
         }
         AppAction::OpenQuickSwitcher => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
             *dialog = DialogState::QuickSwitch {
                 query: String::new(),
                 cursor_pos: 0,
@@ -846,7 +1027,9 @@ fn exit_scrollback_if_active<P: PtyPort, S: ScreenPort>(
     input_handler: &mut InputHandler,
     scrollback_target: &mut Option<ScrollbackTarget>,
     mini_terminal: &MiniTerminalState,
+    search_state: &mut Option<SearchState>,
 ) {
+    *search_state = None; // Clear search on exit
     if let Some(target) = *scrollback_target {
         match target {
             ScrollbackTarget::MainTerminal => {
@@ -863,6 +1046,112 @@ fn exit_scrollback_if_active<P: PtyPort, S: ScreenPort>(
             }
         }
         *scrollback_target = None;
+    }
+}
+
+fn handle_search_key<P: PtyPort, S: ScreenPort>(
+    key: KeyEvent,
+    controller: &mut TuiController<P, S>,
+    input_handler: &mut InputHandler,
+    scrollback_target: &mut Option<ScrollbackTarget>,
+    mini_terminal: &MiniTerminalState,
+    search_state: &mut Option<SearchState>,
+) -> anyhow::Result<()> {
+    let state = match search_state.as_mut() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    match key.code {
+        KeyCode::Char(c) => {
+            let byte_idx = char_to_byte_index(&state.query, state.cursor_pos);
+            state.query.insert(byte_idx, c);
+            state.cursor_pos += 1;
+            // Re-run search
+            execute_search(controller, scrollback_target, mini_terminal, state);
+        }
+        KeyCode::Backspace => {
+            if state.cursor_pos > 0 {
+                let byte_idx = char_to_byte_index(&state.query, state.cursor_pos - 1);
+                state.query.remove(byte_idx);
+                state.cursor_pos -= 1;
+                // Re-run search
+                execute_search(controller, scrollback_target, mini_terminal, state);
+            }
+        }
+        KeyCode::Enter => {
+            if !state.query.is_empty() && !state.matches.is_empty() {
+                state.confirmed = true;
+                input_handler.set_mode(InputMode::ScrollbackMode);
+            } else {
+                // Empty query or no matches: cancel
+                *search_state = None;
+                input_handler.set_mode(InputMode::ScrollbackMode);
+            }
+        }
+        KeyCode::Esc => {
+            *search_state = None;
+            input_handler.set_mode(InputMode::ScrollbackMode);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn execute_search<P: PtyPort, S: ScreenPort>(
+    controller: &mut TuiController<P, S>,
+    scrollback_target: &Option<ScrollbackTarget>,
+    mini_terminal: &MiniTerminalState,
+    state: &mut SearchState,
+) {
+    if state.query.is_empty() {
+        state.matches.clear();
+        state.current_match_index = None;
+        return;
+    }
+
+    if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal)
+        && let Ok(matches) = controller
+            .usecase_mut()
+            .screen_port_mut()
+            .search_scrollback(id, &state.query)
+    {
+        state.matches = matches;
+        if !state.matches.is_empty() {
+            state.current_match_index = Some(0);
+            // Jump to first match
+            scroll_to_match(controller, scrollback_target, mini_terminal, state, 0);
+        } else {
+            state.current_match_index = None;
+        }
+    }
+}
+
+fn scroll_to_match<P: PtyPort, S: ScreenPort>(
+    controller: &mut TuiController<P, S>,
+    scrollback_target: &Option<ScrollbackTarget>,
+    mini_terminal: &MiniTerminalState,
+    state: &SearchState,
+    match_index: usize,
+) {
+    if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal)
+        && let Some(m) = state.matches.get(match_index)
+    {
+        let max = controller
+            .usecase()
+            .screen_port()
+            .get_max_scrollback(id)
+            .unwrap_or(0);
+        // target_offset puts the match row near the top of the visible area.
+        // vt100: set_scrollback(N) scrolls N lines up from live view.
+        // With offset=N, visible rows start at abs_row (max - N).
+        // To show match at abs_row R: need offset = max - R.
+        let target_offset = max.saturating_sub(m.row);
+        let clamped = target_offset.min(max);
+        let _ = controller
+            .usecase_mut()
+            .screen_port_mut()
+            .set_scrollback_offset(id, clamped);
     }
 }
 
@@ -2528,5 +2817,190 @@ mod tests {
     fn qs_ctrl_j_increments_selected_index() {
         // Same as Down
         assert_eq!(simulate_qs_down(2), 3);
+    }
+
+    // === SearchState tests (Tasks #85-#87) ===
+
+    #[test]
+    fn search_state_new_has_empty_query() {
+        let state = SearchState::new();
+        assert!(state.query.is_empty());
+        assert_eq!(state.cursor_pos, 0);
+        assert!(state.matches.is_empty());
+        assert_eq!(state.current_match_index, None);
+        assert!(!state.confirmed);
+    }
+
+    #[test]
+    fn search_state_match_info_empty_query_returns_none() {
+        let state = SearchState::new();
+        assert_eq!(state.match_info(), None);
+    }
+
+    #[test]
+    fn search_state_match_info_nonempty_query_no_matches_returns_zero_zero() {
+        let mut state = SearchState::new();
+        state.query = "test".to_string();
+        assert_eq!(state.match_info(), Some((0, 0)));
+    }
+
+    #[test]
+    fn search_state_match_info_with_matches_and_current_index() {
+        let mut state = SearchState::new();
+        state.query = "test".to_string();
+        state.matches = vec![
+            SearchMatch { row: 0, col_start: 0, col_end: 4 },
+            SearchMatch { row: 5, col_start: 2, col_end: 6 },
+            SearchMatch { row: 10, col_start: 0, col_end: 4 },
+        ];
+        state.current_match_index = Some(1);
+        // 1-indexed: current=2, total=3
+        assert_eq!(state.match_info(), Some((2, 3)));
+    }
+
+    #[test]
+    fn search_state_match_info_with_matches_no_current() {
+        let mut state = SearchState::new();
+        state.query = "test".to_string();
+        state.matches = vec![SearchMatch { row: 0, col_start: 0, col_end: 4 }];
+        state.current_match_index = None;
+        // No current => 0, total=1
+        assert_eq!(state.match_info(), Some((0, 1)));
+    }
+
+    #[test]
+    fn search_state_match_info_first_match() {
+        let mut state = SearchState::new();
+        state.query = "x".to_string();
+        state.matches = vec![
+            SearchMatch { row: 0, col_start: 0, col_end: 1 },
+            SearchMatch { row: 1, col_start: 0, col_end: 1 },
+        ];
+        state.current_match_index = Some(0);
+        // 1-indexed: current=1, total=2
+        assert_eq!(state.match_info(), Some((1, 2)));
+    }
+
+    // === Task #88: Edge case tests ===
+
+    /// Simulate ExitScrollback behavior with search_state:
+    /// If search_state is Some, first clear it and stay in scrollback.
+    /// If search_state is None, exit scrollback entirely.
+    fn simulate_exit_scrollback_with_search(
+        search_state: &mut Option<SearchState>,
+        scrollback_target: Option<ScrollbackTarget>,
+    ) -> (Option<ScrollbackTarget>, bool) {
+        if search_state.is_some() {
+            // First Esc clears search highlights, stays in scrollback
+            *search_state = None;
+            (scrollback_target, false) // did NOT exit scrollback
+        } else {
+            // No search active, actually exit scrollback
+            (None, true) // DID exit scrollback
+        }
+    }
+
+    #[test]
+    fn exit_scrollback_with_confirmed_search_clears_search_first() {
+        let mut search_state: Option<SearchState> = Some(SearchState::new());
+        search_state.as_mut().unwrap().query = "test".to_string();
+        search_state.as_mut().unwrap().confirmed = true;
+        let target = Some(ScrollbackTarget::MainTerminal);
+
+        let (result_target, exited) =
+            simulate_exit_scrollback_with_search(&mut search_state, target);
+
+        assert!(search_state.is_none(), "search_state should be cleared");
+        assert_eq!(
+            result_target,
+            Some(ScrollbackTarget::MainTerminal),
+            "scrollback target should remain"
+        );
+        assert!(!exited, "should NOT have exited scrollback");
+    }
+
+    #[test]
+    fn exit_scrollback_without_search_exits_scrollback() {
+        let mut search_state: Option<SearchState> = None;
+        let target = Some(ScrollbackTarget::MainTerminal);
+
+        let (result_target, exited) =
+            simulate_exit_scrollback_with_search(&mut search_state, target);
+
+        assert!(search_state.is_none());
+        assert!(result_target.is_none(), "scrollback target should be cleared");
+        assert!(exited, "should have exited scrollback");
+    }
+
+    #[test]
+    fn exit_scrollback_with_unconfirmed_search_clears_search_first() {
+        let mut search_state: Option<SearchState> = Some(SearchState::new());
+        search_state.as_mut().unwrap().query = "test".to_string();
+        // confirmed is false (default)
+        let target = Some(ScrollbackTarget::MiniTerminal);
+
+        let (result_target, exited) =
+            simulate_exit_scrollback_with_search(&mut search_state, target);
+
+        assert!(search_state.is_none(), "search_state should be cleared");
+        assert_eq!(
+            result_target,
+            Some(ScrollbackTarget::MiniTerminal),
+            "scrollback target should remain"
+        );
+        assert!(!exited, "should NOT have exited scrollback");
+    }
+
+    /// Simulate mini terminal exit clearing search state when searching mini terminal.
+    fn simulate_mini_terminal_exit_clears_search(
+        search_state: &mut Option<SearchState>,
+        scrollback_target: &Option<ScrollbackTarget>,
+    ) {
+        if search_state.is_some()
+            && *scrollback_target == Some(ScrollbackTarget::MiniTerminal)
+        {
+            *search_state = None;
+        }
+    }
+
+    #[test]
+    fn mini_terminal_exit_clears_search_if_searching_mini() {
+        let mut search_state: Option<SearchState> = Some(SearchState::new());
+        search_state.as_mut().unwrap().query = "hello".to_string();
+        let target = Some(ScrollbackTarget::MiniTerminal);
+
+        simulate_mini_terminal_exit_clears_search(&mut search_state, &target);
+
+        assert!(
+            search_state.is_none(),
+            "search_state should be cleared when mini terminal exits during search"
+        );
+    }
+
+    #[test]
+    fn mini_terminal_exit_does_not_clear_search_if_searching_main() {
+        let mut search_state: Option<SearchState> = Some(SearchState::new());
+        search_state.as_mut().unwrap().query = "hello".to_string();
+        let target = Some(ScrollbackTarget::MainTerminal);
+
+        simulate_mini_terminal_exit_clears_search(&mut search_state, &target);
+
+        assert!(
+            search_state.is_some(),
+            "search_state should NOT be cleared when searching main terminal"
+        );
+    }
+
+    #[test]
+    fn mini_terminal_exit_noop_if_no_search() {
+        let mut search_state: Option<SearchState> = None;
+        let target = Some(ScrollbackTarget::MiniTerminal);
+
+        simulate_mini_terminal_exit_clears_search(&mut search_state, &target);
+
+        assert!(
+            search_state.is_none(),
+            "search_state should remain None"
+        );
     }
 }

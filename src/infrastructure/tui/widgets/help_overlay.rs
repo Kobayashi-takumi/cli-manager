@@ -98,6 +98,9 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
             ("g", "Go to top"),
             ("G", "Go to bottom"),
             ("Esc/q", "Exit scrollback"),
+            ("/", "Search"),
+            ("n", "Next match"),
+            ("N", "Prev match"),
         ],
     );
     frame.render_widget(Paragraph::new(scroll_lines), columns[2]);
@@ -391,6 +394,24 @@ mod tests {
         assert!(
             content.contains("Quick switch"),
             "Expected 'Quick switch' keybinding in NAVIGATION category"
+        );
+    }
+
+    #[test]
+    fn help_overlay_renders_search_keybindings() {
+        let buf = render_help(80, 28);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("Search"),
+            "Expected 'Search' keybinding in SCROLLBACK category"
+        );
+        assert!(
+            content.contains("Next match"),
+            "Expected 'Next match' keybinding in SCROLLBACK category"
+        );
+        assert!(
+            content.contains("Prev match"),
+            "Expected 'Prev match' keybinding in SCROLLBACK category"
         );
     }
 }

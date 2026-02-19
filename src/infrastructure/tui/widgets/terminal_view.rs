@@ -6,6 +6,14 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::domain::primitive::{Cell, Color, CursorPos};
 
+/// Search match highlight information for terminal_view rendering.
+pub struct SearchHighlights {
+    /// Matches as (row, col_start, col_end) in display coordinates (relative to visible area).
+    pub matches: Vec<(usize, usize, usize)>,
+    /// Index into `matches` of the current (focused) match, if any.
+    pub current_match_index: Option<usize>,
+}
+
 /// Convert domain Color to ratatui Color
 fn to_ratatui_color(color: Color) -> RatColor {
     match color {
@@ -25,11 +33,12 @@ pub fn render(
     is_focused: bool,
     scrollback_info: Option<(usize, usize)>,
     in_scrollback: bool,
+    search_highlights: Option<&SearchHighlights>,
 ) {
     if in_scrollback && area.width >= 4 && area.height >= 5 {
-        render_scrollback_mode(frame, area, cells_opt, cwd_opt, is_focused, scrollback_info);
+        render_scrollback_mode(frame, area, cells_opt, cwd_opt, is_focused, scrollback_info, search_highlights);
     } else {
-        render_normal_mode(frame, area, cells_opt, cursor_opt, cursor_visible, cwd_opt, is_focused, scrollback_info);
+        render_normal_mode(frame, area, cells_opt, cursor_opt, cursor_visible, cwd_opt, is_focused, scrollback_info, search_highlights);
     }
 }
 
@@ -58,6 +67,7 @@ fn render_scrollback_mode(
     cwd_opt: Option<&str>,
     is_focused: bool,
     scrollback_info: Option<(usize, usize)>,
+    search_highlights: Option<&SearchHighlights>,
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -98,7 +108,7 @@ fn render_scrollback_mode(
 
     // Terminal content
     if let Some(cells) = cells_opt {
-        let lines = cells_to_lines(cells, content_area.height as usize, content_area.width as usize);
+        let lines = cells_to_lines(cells, content_area.height as usize, content_area.width as usize, search_highlights);
         frame.render_widget(Paragraph::new(lines), content_area);
     }
 
@@ -137,6 +147,7 @@ fn render_normal_mode(
     cwd_opt: Option<&str>,
     is_focused: bool,
     scrollback_info: Option<(usize, usize)>,
+    search_highlights: Option<&SearchHighlights>,
 ) {
     // Split into CWD bar (1 line) + terminal content
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
@@ -173,7 +184,7 @@ fn render_normal_mode(
             frame.render_widget(Paragraph::new(vec![line]), centered_area);
         }
         Some(cells) => {
-            let lines = cells_to_lines(cells, content_area.height as usize, content_area.width as usize);
+            let lines = cells_to_lines(cells, content_area.height as usize, content_area.width as usize, search_highlights);
             let paragraph = Paragraph::new(lines);
             frame.render_widget(paragraph, content_area);
 
@@ -248,25 +259,49 @@ fn render_normal_mode(
     }
 }
 
+/// Check if a cell at the given (display_row, cell_col) is within a search highlight range.
+/// Returns `Some(true)` if it's the current match, `Some(false)` if a normal match, `None` if not highlighted.
+fn check_search_highlight(
+    highlights: Option<&SearchHighlights>,
+    display_row: usize,
+    cell_col: usize,
+) -> Option<bool> {
+    let hl = highlights?;
+    for (i, &(row, col_start, col_end)) in hl.matches.iter().enumerate() {
+        if row == display_row && cell_col >= col_start && cell_col < col_end {
+            let is_current = hl.current_match_index == Some(i);
+            return Some(is_current);
+        }
+    }
+    None
+}
+
 /// Convert cell grid to ratatui Lines, applying visual width clipping and styling.
-fn cells_to_lines<'a>(cells: &[Vec<Cell>], visible_rows: usize, visible_cols: usize) -> Vec<Line<'a>> {
+fn cells_to_lines<'a>(
+    cells: &[Vec<Cell>],
+    visible_rows: usize,
+    visible_cols: usize,
+    search_highlights: Option<&SearchHighlights>,
+) -> Vec<Line<'a>> {
     cells
         .iter()
         .take(visible_rows)
-        .map(|row| {
+        .enumerate()
+        .map(|(row_idx, row)| {
             let spans: Vec<Span> = row
                 .iter()
-                .filter(|cell| cell.width != 0)
-                .scan(0u16, |visual_col, cell| {
+                .enumerate()
+                .filter(|(_, cell)| cell.width != 0)
+                .scan(0u16, |visual_col, (col_idx, cell)| {
                     let w = if cell.width == 2 { 2 } else { 1 };
                     *visual_col += w;
                     if *visual_col <= visible_cols as u16 {
-                        Some(cell)
+                        Some((col_idx, cell))
                     } else {
                         None
                     }
                 })
-                .map(|cell| {
+                .map(|(col_idx, cell)| {
                     let (fg, bg) = if cell.reverse {
                         let rfg = to_ratatui_color(cell.bg);
                         let rbg = to_ratatui_color(cell.fg);
@@ -299,6 +334,20 @@ fn cells_to_lines<'a>(cells: &[Vec<Cell>], visible_rows: usize, visible_cols: us
                     if cell.strikethrough {
                         style = style.add_modifier(Modifier::CROSSED_OUT);
                     }
+
+                    // Apply search highlight override
+                    if let Some(is_current) = check_search_highlight(search_highlights, row_idx, col_idx) {
+                        if is_current {
+                            style = style
+                                .fg(RatColor::Black)
+                                .bg(RatColor::Rgb(255, 165, 0)); // Orange for current match
+                        } else {
+                            style = style
+                                .fg(RatColor::Black)
+                                .bg(RatColor::Yellow); // Yellow for normal matches
+                        }
+                    }
+
                     Span::styled(cell.ch.to_string(), style)
                 })
                 .collect();
@@ -345,7 +394,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 60, 20);
-                render(frame, area, None, None, true, None, true, None, false);
+                render(frame, area, None, None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -372,7 +421,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 60, 20);
-                render(frame, area, None, None, true, Some("/home/user/project"), true, None, false);
+                render(frame, area, None, None, true, Some("/home/user/project"), true, None, false, None);
             })
             .unwrap();
 
@@ -403,7 +452,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -426,7 +475,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -450,7 +499,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -479,7 +528,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 5, 4);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -499,7 +548,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, None, None, true, None, true, None, false);
+                render(frame, area, None, None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -516,7 +565,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, None, None, true, Some("/tmp"), true, None, false);
+                render(frame, area, None, None, true, Some("/tmp"), true, None, false, None);
             })
             .unwrap();
 
@@ -533,7 +582,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, None, None, true, Some("/tmp"), false, None, false);
+                render(frame, area, None, None, true, Some("/tmp"), false, None, false, None);
             })
             .unwrap();
 
@@ -557,7 +606,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -579,7 +628,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -601,7 +650,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -625,7 +674,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -653,7 +702,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -678,7 +727,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -706,7 +755,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -732,7 +781,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, Some(&cells), Some(cursor), true, None, true, None, false);
+                render(frame, area, Some(&cells), Some(cursor), true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -765,7 +814,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, Some(&cells), Some(cursor), true, None, true, None, false);
+                render(frame, area, Some(&cells), Some(cursor), true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -795,7 +844,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 5, 4);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -829,7 +878,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, Some(&cells), Some(cursor), true, None, true, None, false);
+                render(frame, area, Some(&cells), Some(cursor), true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -858,7 +907,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 3, 4);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -887,7 +936,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -914,7 +963,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -938,7 +987,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 30, 5);
-                render(frame, area, Some(&cells), None, true, None, true, Some((42, 1000)), false);
+                render(frame, area, Some(&cells), None, true, None, true, Some((42, 1000)), false, None);
             })
             .unwrap();
 
@@ -966,7 +1015,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 30, 5);
-                render(frame, area, Some(&cells), None, true, None, true, Some((0, 1000)), false);
+                render(frame, area, Some(&cells), None, true, None, true, Some((0, 1000)), false, None);
             })
             .unwrap();
 
@@ -986,7 +1035,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 30, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None, false);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
             })
             .unwrap();
 
@@ -1006,7 +1055,7 @@ mod tests {
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
                 // "[5/50]" = 6 chars, starts at col 20-6 = 14
-                render(frame, area, Some(&cells), None, true, None, true, Some((5, 50)), false);
+                render(frame, area, Some(&cells), None, true, None, true, Some((5, 50)), false, None);
             })
             .unwrap();
 
@@ -1028,7 +1077,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 3, 4);
-                render(frame, area, Some(&cells), None, true, None, true, Some((1, 10)), false);
+                render(frame, area, Some(&cells), None, true, None, true, Some((1, 10)), false, None);
             })
             .unwrap();
 
@@ -1050,7 +1099,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 60, 20);
-                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true);
+                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true, None);
             })
             .unwrap();
 
@@ -1072,7 +1121,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 60, 20);
-                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true);
+                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true, None);
             })
             .unwrap();
 
@@ -1096,7 +1145,7 @@ mod tests {
             .draw(|frame| {
                 let area = Rect::new(0, 0, 60, 20);
                 let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
-                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true);
+                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true, None);
             })
             .unwrap();
 
@@ -1119,7 +1168,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 80, 20);
-                render(frame, area, Some(&cells), None, false, None, true, Some((50, 200)), true);
+                render(frame, area, Some(&cells), None, false, None, true, Some((50, 200)), true, None);
             })
             .unwrap();
 
@@ -1151,7 +1200,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 60, 20);
-                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true);
+                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true, None);
             })
             .unwrap();
 
@@ -1172,7 +1221,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 60, 20);
-                render(frame, area, Some(&cells), None, false, None, true, Some((0, 100)), true);
+                render(frame, area, Some(&cells), None, false, None, true, Some((0, 100)), true, None);
             })
             .unwrap();
 
@@ -1201,7 +1250,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 3, 4);
-                render(frame, area, Some(&cells), None, false, None, true, Some((5, 50)), true);
+                render(frame, area, Some(&cells), None, false, None, true, Some((5, 50)), true, None);
             })
             .unwrap();
 
@@ -1221,7 +1270,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 60, 20);
-                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true);
+                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true, None);
             })
             .unwrap();
 
@@ -1243,7 +1292,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 80, 20);
-                render(frame, area, Some(&cells), None, false, None, true, Some((50, 100)), true);
+                render(frame, area, Some(&cells), None, false, None, true, Some((50, 100)), true, None);
             })
             .unwrap();
 
@@ -1290,5 +1339,192 @@ mod tests {
         let bar = build_progress_bar(10, 0, 100);
         let empty = bar.chars().filter(|&c| c == '░').count();
         assert_eq!(empty, 10);
+    }
+
+    // === check_search_highlight unit tests ===
+
+    #[test]
+    fn check_search_highlight_none_when_no_highlights() {
+        let result = check_search_highlight(None, 0, 0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn check_search_highlight_none_when_not_in_range() {
+        let hl = SearchHighlights {
+            matches: vec![(0, 5, 10)],
+            current_match_index: Some(0),
+        };
+        // col 3 is before the match range [5, 10)
+        let result = check_search_highlight(Some(&hl), 0, 3);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn check_search_highlight_returns_true_for_current_match() {
+        let hl = SearchHighlights {
+            matches: vec![(0, 5, 10)],
+            current_match_index: Some(0),
+        };
+        let result = check_search_highlight(Some(&hl), 0, 5);
+        assert_eq!(result, Some(true));
+    }
+
+    #[test]
+    fn check_search_highlight_returns_false_for_non_current_match() {
+        let hl = SearchHighlights {
+            matches: vec![(0, 5, 10), (1, 0, 3)],
+            current_match_index: Some(0),
+        };
+        // Match at index 1 is not current
+        let result = check_search_highlight(Some(&hl), 1, 1);
+        assert_eq!(result, Some(false));
+    }
+
+    #[test]
+    fn check_search_highlight_exclusive_end() {
+        let hl = SearchHighlights {
+            matches: vec![(0, 5, 10)],
+            current_match_index: Some(0),
+        };
+        // col 10 is at the exclusive end boundary -- should NOT match
+        let result = check_search_highlight(Some(&hl), 0, 10);
+        assert!(result.is_none());
+        // col 9 is the last inclusive position -- should match
+        let result = check_search_highlight(Some(&hl), 0, 9);
+        assert_eq!(result, Some(true));
+    }
+
+    #[test]
+    fn check_search_highlight_wrong_row_returns_none() {
+        let hl = SearchHighlights {
+            matches: vec![(0, 5, 10)],
+            current_match_index: Some(0),
+        };
+        let result = check_search_highlight(Some(&hl), 1, 5);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn check_search_highlight_no_current_match_index() {
+        let hl = SearchHighlights {
+            matches: vec![(0, 5, 10)],
+            current_match_index: None,
+        };
+        // Match exists but no current index: returns false (not current)
+        let result = check_search_highlight(Some(&hl), 0, 5);
+        assert_eq!(result, Some(false));
+    }
+
+    // === search highlight rendering tests ===
+
+    #[test]
+    fn render_with_search_highlights_normal_match_has_yellow_bg() {
+        let backend = TestBackend::new(20, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![
+            Cell { ch: 'a', ..Cell::default() },
+            Cell { ch: 'b', ..Cell::default() },
+            Cell { ch: 'c', ..Cell::default() },
+        ]];
+
+        let highlights = SearchHighlights {
+            matches: vec![(0, 1, 2)], // highlight cell at col 1 ('b')
+            current_match_index: None,
+        };
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 20, 5);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, Some(&highlights));
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Content at row 1 (after CWD bar), col 1 should have Yellow background
+        assert_eq!(buf[(1, 1)].bg, RatColor::Yellow);
+        assert_eq!(buf[(1, 1)].fg, RatColor::Black);
+        // Col 0 ('a') should NOT have yellow bg
+        assert_ne!(buf[(0, 1)].bg, RatColor::Yellow);
+    }
+
+    #[test]
+    fn render_with_search_highlights_current_match_has_orange_bg() {
+        let backend = TestBackend::new(20, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![
+            Cell { ch: 'x', ..Cell::default() },
+            Cell { ch: 'y', ..Cell::default() },
+            Cell { ch: 'z', ..Cell::default() },
+        ]];
+
+        let highlights = SearchHighlights {
+            matches: vec![(0, 0, 2)], // highlight cols 0-1 ('x', 'y')
+            current_match_index: Some(0),
+        };
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 20, 5);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, Some(&highlights));
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Current match should have orange bg (Rgb(255, 165, 0))
+        assert_eq!(buf[(0, 1)].bg, RatColor::Rgb(255, 165, 0));
+        assert_eq!(buf[(0, 1)].fg, RatColor::Black);
+        assert_eq!(buf[(1, 1)].bg, RatColor::Rgb(255, 165, 0));
+        // Col 2 ('z') should NOT have highlight bg
+        assert_ne!(buf[(2, 1)].bg, RatColor::Rgb(255, 165, 0));
+    }
+
+    #[test]
+    fn render_with_no_highlights_renders_normally() {
+        let backend = TestBackend::new(20, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![
+            Cell { ch: 'a', ..Cell::default() },
+        ]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 20, 5);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, None);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Without highlights, standard rendering - no yellow/orange bg
+        assert_ne!(buf[(0, 1)].bg, RatColor::Yellow);
+        assert_ne!(buf[(0, 1)].bg, RatColor::Rgb(255, 165, 0));
+    }
+
+    #[test]
+    fn render_with_empty_highlights_renders_normally() {
+        let backend = TestBackend::new(20, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![
+            Cell { ch: 'a', ..Cell::default() },
+        ]];
+
+        let highlights = SearchHighlights {
+            matches: vec![],
+            current_match_index: None,
+        };
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 20, 5);
+                render(frame, area, Some(&cells), None, true, None, true, None, false, Some(&highlights));
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        assert_ne!(buf[(0, 1)].bg, RatColor::Yellow);
     }
 }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::domain::primitive::{Cell, Color, CursorPos, CursorStyle, NotificationEvent, TerminalId, TerminalSize};
+use crate::domain::primitive::{Cell, Color, CursorPos, CursorStyle, NotificationEvent, SearchMatch, TerminalId, TerminalSize};
 use crate::interface_adapter::port::screen_port::ScreenPort;
 use crate::shared::error::AppError;
 
@@ -1088,6 +1088,11 @@ impl ScreenPort for VteScreenAdapter {
 
     fn drain_pending_responses(&mut self, _id: TerminalId) -> Result<Vec<Vec<u8>>, AppError> {
         // VteScreenAdapter does not handle DSR queries
+        Ok(vec![])
+    }
+
+    fn search_scrollback(&mut self, _id: TerminalId, _query: &str) -> Result<Vec<SearchMatch>, AppError> {
+        // VteScreenAdapter does not support scrollback search
         Ok(vec![])
     }
 }

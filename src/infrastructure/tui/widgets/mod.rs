@@ -6,3 +6,4 @@ pub mod dialog;
 pub mod memo_overlay;
 pub mod help_overlay;
 pub mod quick_switcher;
+pub mod search_bar;

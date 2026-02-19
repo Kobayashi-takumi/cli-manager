@@ -44,6 +44,7 @@ TUI ベースのターミナルマルチプレクサ。複数の CLI プロセ�
 | OSC 7 動的 CWD | シェルの現在ディレクトリをサイドバーに反映 |
 | 通知 | BEL / OSC 9 / OSC 777 検出 → サイドバーマーク + macOS デスクトップ通知 |
 | スクロールバック | 出力履歴を vim ライクなキーバインドでスクロール閲覧（10,000 行バッファ） |
+| スクロールバック検索 | `/` でインクリメンタル検索。`n` / `N` でマッチ間ジャンプ。メイン・ミニターミナル両対応 |
 | リネーム | ターミナル名を後から変更可能 |
 | メモ | 各ターミナルに複数行メモを付与・編集。サイドバーに `[≡]` インジケータ表示 |
 | ヘルプオーバーレイ | `Ctrl+b` → `?` でキーバインド一覧をオーバーレイ表示 |
@@ -121,6 +122,21 @@ cargo run
 | `g` | バッファの先頭にジャンプ |
 | `G` | バッファの末尾にジャンプ |
 | `Esc` / `q` | スクロールバックモードを終了 |
+| `/` | 検索モードに入る（インクリメンタル検索） |
+| `n` | 次のマッチにジャンプ（検索確定後） |
+| `N` | 前のマッチにジャンプ（検索確定後） |
+| `Enter` | 検索を確定し、`n` / `N` でのナビゲーションモードへ移行 |
+| `Esc` | 検索をキャンセル（検索中は検索終了、その後もう一度で通常モードへ） |
+
+**検索の使い方:**
+
+1. スクロールバックモード（`Ctrl+b` → `[`）に入る
+2. `/` を押して検索クエリを入力（大文字小文字を区別しない）
+3. 入力中はリアルタイムでマッチ箇所がハイライト表示される
+4. `Enter` で検索を確定 → `n` / `N` でマッチ間をジャンプ
+5. `Esc` で検索を終了しスクロールバックモードに戻る
+
+検索バーはメインペイン下部に表示され、`[現在/総数]` 形式でマッチ数が確認できます。メインターミナルとミニターミナルの両方で利用可能です。
 
 #### リネーム
 
@@ -190,6 +206,8 @@ stateDiagram-v2
     MiniTerminalInput --> PrefixWait : Ctrl+b 押下
     PrefixWait --> Normal : 1秒タイムアウト\n(Ctrl+b を子プロセスへ送信)
     PrefixWait --> Normal : Ctrl+b 再押下\n(Ctrl+b を子プロセスへ送信)
+    ScrollbackMode --> SearchInput : / 押下 (検索)
+    SearchInput --> ScrollbackMode : Enter (確定) / Esc (キャンセル)
     ScrollbackMode --> Normal : Esc / q 押下
     DialogInput --> Normal : Enter / Esc
     MemoEdit --> Normal : Enter (保存) / Esc (破棄)
@@ -311,7 +329,7 @@ graph TD
         VT100["Vt100ScreenAdapter<br/>(vt100)"]
         TUI["TUI<br/>(ratatui + crossterm)"]
         INPUT["InputHandler"]
-        WIDGETS["Widgets<br/>(sidebar, terminal_view,<br/>mini_terminal_view, dialog,<br/>memo_overlay, help_overlay,<br/>quick_switcher)"]
+        WIDGETS["Widgets<br/>(sidebar, terminal_view,<br/>mini_terminal_view, dialog,<br/>memo_overlay, help_overlay,<br/>quick_switcher, search_bar)"]
         NOTIF["MacOsNotifier<br/>(notify-rust)"]
     end
 
@@ -438,7 +456,8 @@ src/
 │       ├── terminal_status.rs           # TerminalStatus
 │       ├── terminal_size.rs             # TerminalSize
 │       ├── cell.rs                      # Cell, CursorPos, Color
-│       └── notification.rs              # NotificationEvent (Bell/Osc9/Osc777)
+│       ├── notification.rs              # NotificationEvent (Bell/Osc9/Osc777)
+│       └── search_match.rs             # SearchMatch (スクロールバック検索結果)
 ├── usecase/
 │   └── terminal_usecase.rs              # TerminalUsecase<P: PtyPort, S: ScreenPort>
 ├── interface_adapter/                   # Interface Adapter 層
@@ -469,7 +488,8 @@ src/
 │   │       ├── dialog.rs                # 確認・リネームダイアログ
 │   │       ├── memo_overlay.rs          # メモ編集オーバーレイ
 │   │       ├── help_overlay.rs          # ヘルプオーバーレイ
-│   │       └── quick_switcher.rs        # クイックスイッチャーオーバーレイ
+│   │       ├── quick_switcher.rs        # クイックスイッチャーオーバーレイ
+│   │       └── search_bar.rs           # スクロールバック検索バー
 │   └── notification/
 │       └── macos_notifier.rs            # macOS デスクトップ通知 (notify-rust)
 └── shared/
@@ -487,7 +507,7 @@ cargo check
 # ビルド
 cargo build
 
-# テスト（全 873 件）
+# テスト（全 936 件）
 cargo test
 
 # 特定のテストのみ実行
@@ -499,40 +519,41 @@ cargo clippy
 
 ### テスト構成
 
-合計 **873** ユニットテスト。各モジュールごとの内訳は以下の通りです。
+合計 **936** ユニットテスト。各モジュールごとの内訳は以下の通りです。
 
 ```mermaid
-pie title ユニットテスト構成 (873件)
+pie title ユニットテスト構成 (936件)
     "VteScreenAdapter (177)" : 177
-    "AppRunner (129)" : 129
-    "Vt100ScreenAdapter (103)" : 103
-    "InputHandler (96)" : 96
+    "AppRunner (140)" : 140
+    "Vt100ScreenAdapter (118)" : 118
+    "InputHandler (104)" : 104
     "TerminalUsecase (61)" : 61
+    "TerminalView (56)" : 56
+    "TuiController (43)" : 43
     "QuickSwitcher (40)" : 40
-    "TuiController (38)" : 38
+    "MiniTerminalView (36)" : 36
     "Sidebar (32)" : 32
-    "MiniTerminalView (31)" : 31
-    "TerminalView (31)" : 31
-    "その他 (135)" : 135
+    "その他 (129)" : 129
 ```
 
 | モジュール | テスト数 | テスト対象 |
 |-----------|---------|-----------|
 | `VteScreenAdapter` | 177 | ANSI パース、セルグリッド、カーソル移動、代替画面、スクロールリージョン、ワイド文字、OSC タイトル、通知 |
-| `AppRunner` | 129 | イベントループシミュレーション、スクロールバック（メイン/ミニ）、フォーカス制御、ミニターミナル管理、クイックスイッチャー統合 |
-| `Vt100ScreenAdapter` | 103 | vt100 ベースパース、セル属性、OSC 7 CWD、OSC タイトル、通知、スクロールバック、カーソルスタイル、DSR 応答 |
-| `InputHandler` | 96 | ステートマシン、プレフィックスキー、タイムアウト、アプリケーションカーソルキー、ブラケットペースト、スクロールバックモード、メモ編集モード、ヘルプ表示、ミニターミナル入力 |
+| `AppRunner` | 140 | イベントループシミュレーション、スクロールバック（メイン/ミニ）、フォーカス制御、ミニターミナル管理、クイックスイッチャー統合、スクロールバック検索 |
+| `Vt100ScreenAdapter` | 118 | vt100 ベースパース、セル属性、OSC 7 CWD、OSC タイトル、通知、スクロールバック、カーソルスタイル、DSR 応答、スクロールバック検索 |
+| `InputHandler` | 104 | ステートマシン、プレフィックスキー、タイムアウト、アプリケーションカーソルキー、ブラケットペースト、スクロールバックモード、検索モード、メモ編集モード、ヘルプ表示、ミニターミナル入力 |
 | `TerminalUsecase` | 61 | CRUD 操作、ポーリング、通知収集、リネーム、メモ操作、エラーハンドリング |
+| `TerminalView` | 56 | 出力表示、ワイド文字クリッピング、カーソル位置、スクロールバック表示、検索ハイライト |
+| `TuiController` | 43 | AppAction ディスパッチ、状態管理、リネーム・メモ・ヘルプ・ミニターミナル・クイックスイッチャー・検索操作 |
 | `QuickSwitcher` | 40 | オーバーレイ描画、クエリ入力、選択ハイライト、マッチ文字ハイライト、スクロール、小画面対応 |
-| `TuiController` | 38 | AppAction ディスパッチ、状態管理、リネーム・メモ・ヘルプ・ミニターミナル・クイックスイッチャー操作 |
+| `MiniTerminalView` | 36 | ミニターミナル描画、セルグリッド、ワイド文字、カーソル位置、スクロールバック表示、検索ハイライト |
 | `Sidebar` | 32 | ターミナル一覧描画、動的 CWD 表示、通知マーク、メモインジケータ |
-| `MiniTerminalView` | 31 | ミニターミナル描画、セルグリッド、ワイド文字、カーソル位置、スクロールバック表示 |
-| `TerminalView` | 31 | 出力表示、ワイド文字クリッピング、カーソル位置、スクロールバック表示 |
+| `HelpOverlay` | 17 | ヘルプオーバーレイ描画、カテゴリ表示、キーバインド一覧、検索キーバインド表示、小画面対応 |
 | `ManagedTerminal` | 17 | エンティティ操作、通知フラグ、リネーム、メモ |
 | `MacOsNotifier` | 17 | デスクトップ通知送信、レート制限 |
-| `HelpOverlay` | 16 | ヘルプオーバーレイ描画、カテゴリ表示、キーバインド一覧、クイックスイッチャー表示、小画面対応 |
 | `NotificationEvent` | 15 | Bell/Osc9/Osc777 イベント |
 | `FuzzyMatcher` | 13 | サブシーケンスマッチ、スコアリング、フィルタ＆ソート、日本語、エッジケース |
+| `SearchBar` | 11 | 検索バー描画、マッチカウンタ表示、スタイリング |
 | `Dialog` | 11 | 確認・リネームダイアログ描画 |
 | `Layout` | 10 | 2ペインレイアウト計算、ミニターミナル分割 |
 | `OSC 7 Parser` | 10 | URI パース、パーセントデコード |

@@ -12,6 +12,7 @@ use crate::interface_adapter::controller::tui_controller::AppAction;
 ///   can detect a 1-second timeout.
 /// - `DialogInput`: a dialog is active; the input handler yields `None` and
 ///   lets the dialog layer consume the keys.
+#[derive(Debug)]
 pub enum InputMode {
     Normal,
     PrefixWait(Instant),
@@ -20,6 +21,7 @@ pub enum InputMode {
     MemoEdit,
     HelpView,
     MiniTerminalInput,
+    ScrollbackSearch,
 }
 
 /// Converts crossterm `KeyEvent`s into `AppAction`s using a prefix-key state
@@ -76,6 +78,7 @@ impl InputHandler {
             InputMode::MemoEdit => None,
             InputMode::HelpView => None,
             InputMode::MiniTerminalInput => self.handle_mini_terminal(key),
+            InputMode::ScrollbackSearch => None, // Handled by caller (app_runner)
         }
     }
 
@@ -116,6 +119,11 @@ impl InputHandler {
 
     fn handle_scrollback(&mut self, key: KeyEvent) -> Option<AppAction> {
         match key.code {
+            KeyCode::Char('/') => Some(AppAction::EnterScrollbackSearch),
+            KeyCode::Char('n') => Some(AppAction::ScrollbackSearchNext),
+            KeyCode::Char('N') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                Some(AppAction::ScrollbackSearchPrev)
+            }
             KeyCode::Up | KeyCode::Char('k') => Some(AppAction::ScrollbackUp(1)),
             KeyCode::Down | KeyCode::Char('j') => Some(AppAction::ScrollbackDown(1)),
             KeyCode::PageUp => Some(AppAction::ScrollbackPageUp),
@@ -1530,5 +1538,81 @@ mod tests {
 
         assert!(matches!(action, Some(AppAction::OpenQuickSwitcher)));
         assert_normal(&handler);
+    }
+
+    // =========================================================================
+    // Tests: Scrollback search keybindings (Task #84)
+    // =========================================================================
+
+    #[test]
+    fn scrollback_mode_slash_enters_search() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::ScrollbackMode);
+        let key = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+        assert!(matches!(action, Some(AppAction::EnterScrollbackSearch)));
+    }
+
+    #[test]
+    fn scrollback_mode_n_next_match() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::ScrollbackMode);
+        let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+        assert!(matches!(action, Some(AppAction::ScrollbackSearchNext)));
+    }
+
+    #[test]
+    fn scrollback_mode_shift_n_prev_match() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::ScrollbackMode);
+        let key = KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT);
+        let action = handler.handle_key(key);
+        assert!(matches!(action, Some(AppAction::ScrollbackSearchPrev)));
+    }
+
+    #[test]
+    fn scrollback_search_mode_consumes_keys() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::ScrollbackSearch);
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+        assert!(action.is_none()); // consumed by app_runner
+    }
+
+    #[test]
+    fn scrollback_search_mode_consumes_enter() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::ScrollbackSearch);
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn scrollback_search_mode_consumes_esc() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::ScrollbackSearch);
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn scrollback_search_mode_consumes_ctrl_b() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::ScrollbackSearch);
+        let key = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        let action = handler.handle_key(key);
+        assert!(action.is_none());
+        assert!(matches!(handler.mode(), InputMode::ScrollbackSearch));
+    }
+
+    #[test]
+    fn scrollback_search_mode_stays_in_mode() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::ScrollbackSearch);
+        handler.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(matches!(handler.mode(), InputMode::ScrollbackSearch));
     }
 }

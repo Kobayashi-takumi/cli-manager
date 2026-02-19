@@ -454,6 +454,10 @@ mod tests {
         fn drain_pending_responses(&mut self, _id: TerminalId) -> Result<Vec<Vec<u8>>, AppError> {
             Ok(vec![])
         }
+
+        fn search_scrollback(&mut self, _id: TerminalId, _query: &str) -> Result<Vec<SearchMatch>, AppError> {
+            Ok(vec![])
+        }
     }
 
     // =========================================================================

@@ -1,4 +1,4 @@
-use crate::domain::primitive::{Cell, CursorPos, CursorStyle, NotificationEvent, TerminalId, TerminalSize};
+use crate::domain::primitive::{Cell, CursorPos, CursorStyle, NotificationEvent, SearchMatch, TerminalId, TerminalSize};
 use crate::shared::error::AppError;
 
 /// Screen buffer operations port.
@@ -61,4 +61,10 @@ pub trait ScreenPort: Send + Sync {
     /// Drain and return any pending terminal responses (e.g., DSR cursor position replies).
     /// These bytes should be written back to the PTY stdin.
     fn drain_pending_responses(&mut self, id: TerminalId) -> Result<Vec<Vec<u8>>, AppError>;
+
+    /// Search the scrollback buffer + current screen for case-insensitive text matches.
+    /// Results are ordered by row ascending (scrollback top = row 0).
+    /// Takes `&mut self` because the implementation needs to temporarily adjust scrollback offset
+    /// to read all scrollback buffer rows.
+    fn search_scrollback(&mut self, id: TerminalId, query: &str) -> Result<Vec<SearchMatch>, AppError>;
 }

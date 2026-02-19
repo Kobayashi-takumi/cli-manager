@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::osc7::parse_osc7_uri;
-use crate::domain::primitive::{Cell, Color, CursorPos, CursorStyle, NotificationEvent, TerminalId, TerminalSize};
+use crate::domain::primitive::{Cell, Color, CursorPos, CursorStyle, NotificationEvent, SearchMatch, TerminalId, TerminalSize};
 use crate::interface_adapter::port::screen_port::ScreenPort;
 use crate::shared::error::AppError;
 
@@ -359,6 +359,151 @@ impl ScreenPort for Vt100ScreenAdapter {
             .get_mut(&id)
             .ok_or(AppError::ScreenNotFound(id))?;
         Ok(std::mem::take(&mut inst.pending_responses))
+    }
+
+    fn search_scrollback(&mut self, id: TerminalId, query: &str) -> Result<Vec<SearchMatch>, AppError> {
+        const MAX_MATCHES: usize = 10_000;
+
+        if query.is_empty() {
+            return Ok(vec![]);
+        }
+        let inst = self
+            .instances
+            .get_mut(&id)
+            .ok_or(AppError::ScreenNotFound(id))?;
+
+        let screen = inst.parser.screen();
+        let rows = screen.size().0 as usize;
+        let cols = screen.size().1 as usize;
+        let max_scrollback = inst.cached_max_scrollback;
+        let total_rows = max_scrollback + rows;
+
+        // Save the current scrollback offset so we can restore it afterwards.
+        let saved_offset = inst.parser.screen().scrollback();
+
+        // Set scrollback to maximum so that screen row 0 = top of scrollback buffer.
+        // After this, screen.cell(r, c) for r in 0..rows shows scrollback rows starting
+        // from the oldest line. We iterate in chunks by adjusting the offset.
+        let query_lower = query.to_lowercase();
+        let mut matches = Vec::new();
+
+        // We need to iterate over total_rows = max_scrollback + screen_rows.
+        // When scrollback is set to max_scrollback, the screen shows rows
+        // [0..rows) where row 0 = oldest scrollback line.
+        // When scrollback is set to 0, the screen shows the live (bottom) rows.
+        //
+        // To read all rows we set scrollback to max_scrollback first. This makes
+        // screen.cell(r, c) return the scrollback rows for r in 0..rows (covering
+        // the first `rows` lines of the total). Then we reduce the offset by `rows`
+        // to reveal the next chunk, and so on.
+        //
+        // However, a simpler approach: we iterate abs_row 0..total_rows, and for
+        // each abs_row we set the scrollback offset such that abs_row appears as
+        // row 0 of the screen view. The offset needed is: max_scrollback - abs_row.
+        // But that requires one set_scrollback call per row, which is expensive.
+        //
+        // Better approach: set scrollback to max, read rows 0..rows (= abs_row 0..rows).
+        // Then set scrollback to max - rows, read rows 0..rows (= abs_row rows..2*rows).
+        // And so on until we've covered all total_rows.
+
+        let query_chars: Vec<char> = query_lower.chars().collect();
+        let qlen = query_chars.len();
+
+        let mut abs_row_base = 0;
+        let mut remaining = total_rows;
+
+        while remaining > 0 && matches.len() < MAX_MATCHES {
+            // Set scrollback offset so that screen row 0 corresponds to abs_row_base.
+            // When abs_row_base == 0, offset = max_scrollback (oldest rows visible).
+            // When abs_row_base == max_scrollback, offset = 0 (live screen).
+            let offset = max_scrollback.saturating_sub(abs_row_base);
+            inst.parser.screen_mut().set_scrollback(offset);
+
+            // The number of rows to read in this chunk.
+            let chunk_rows = remaining.min(rows);
+
+            for local_row in 0..chunk_rows {
+                if matches.len() >= MAX_MATCHES {
+                    break;
+                }
+
+                let abs_row = abs_row_base + local_row;
+                let screen_row = local_row as u16;
+
+                // Build row text from cells, skipping width=0 continuation cells.
+                // Track the mapping from character index in line_text to cell column.
+                let mut line_text = String::new();
+                let mut cell_positions: Vec<usize> = Vec::new();
+
+                for col in 0..cols {
+                    if let Some(cell) = inst.parser.screen().cell(screen_row, col as u16) {
+                        // Skip width=0 continuation cells (2nd half of wide char)
+                        if cell.is_wide_continuation() {
+                            continue;
+                        }
+
+                        let ch = cell.contents();
+                        if ch.is_empty() || ch == "\u{0}" {
+                            cell_positions.push(col);
+                            line_text.push(' ');
+                        } else {
+                            for c in ch.chars() {
+                                cell_positions.push(col);
+                                line_text.push(c);
+                            }
+                        }
+                    }
+                }
+
+                // Case-insensitive search using character-based comparison
+                // to properly handle multi-byte UTF-8 (e.g., Japanese wide chars).
+                let line_chars: Vec<char> = line_text.chars().flat_map(|c| c.to_lowercase()).collect();
+
+                if qlen > 0 && qlen <= line_chars.len() {
+                    let mut search_start = 0;
+                    while search_start + qlen <= line_chars.len() {
+                        if matches.len() >= MAX_MATCHES {
+                            break;
+                        }
+
+                        if line_chars[search_start..search_start + qlen] == query_chars[..] {
+                            let char_start = search_start;
+                            let char_end = search_start + qlen;
+
+                            if char_start < cell_positions.len() && char_end <= cell_positions.len() {
+                                let col_start = cell_positions[char_start];
+                                let col_end = if char_end < cell_positions.len() {
+                                    cell_positions[char_end]
+                                } else {
+                                    // Match extends to the end: use last cell column + its width
+                                    let last_col = cell_positions[cell_positions.len() - 1];
+                                    if let Some(cell) = inst.parser.screen().cell(screen_row, last_col as u16) {
+                                        if cell.is_wide() {
+                                            last_col + 2
+                                        } else {
+                                            last_col + 1
+                                        }
+                                    } else {
+                                        last_col + 1
+                                    }
+                                };
+                                matches.push(SearchMatch { row: abs_row, col_start, col_end });
+                            }
+                        }
+
+                        search_start += 1;
+                    }
+                }
+            }
+
+            abs_row_base += chunk_rows;
+            remaining -= chunk_rows;
+        }
+
+        // Restore the original scrollback offset.
+        inst.parser.screen_mut().set_scrollback(saved_offset);
+
+        Ok(matches)
     }
 }
 
@@ -1590,5 +1735,248 @@ mod tests {
         let responses = adapter.drain_pending_responses(id(1)).unwrap();
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0], b"\x1b[1;6R");
+    }
+
+    // ─── search_scrollback tests ───
+
+    #[test]
+    fn search_basic_match_on_visible_screen() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"hello world").unwrap();
+
+        let matches = adapter.search_scrollback(id(1), "hello").unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].col_start, 0);
+        assert_eq!(matches[0].col_end, 5);
+    }
+
+    #[test]
+    fn search_multiple_matches_on_same_line() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"error error error").unwrap();
+
+        let matches = adapter.search_scrollback(id(1), "error").unwrap();
+        assert_eq!(matches.len(), 3);
+        assert_eq!(matches[0].col_start, 0);
+        assert_eq!(matches[0].col_end, 5);
+        assert_eq!(matches[1].col_start, 6);
+        assert_eq!(matches[1].col_end, 11);
+        assert_eq!(matches[2].col_start, 12);
+        assert_eq!(matches[2].col_end, 17);
+    }
+
+    #[test]
+    fn search_multiple_lines() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"foo bar\r\nbaz foo").unwrap();
+
+        let matches = adapter.search_scrollback(id(1), "foo").unwrap();
+        assert_eq!(matches.len(), 2);
+        // First match on row 0 (which is max_scrollback + 0 in absolute terms)
+        assert_eq!(matches[0].col_start, 0);
+        assert_eq!(matches[0].col_end, 3);
+        // Second match on row 1
+        assert!(matches[1].row > matches[0].row);
+        assert_eq!(matches[1].col_start, 4);
+        assert_eq!(matches[1].col_end, 7);
+    }
+
+    #[test]
+    fn search_case_insensitive() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"Hello WORLD").unwrap();
+
+        let matches = adapter.search_scrollback(id(1), "hello").unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].col_start, 0);
+        assert_eq!(matches[0].col_end, 5);
+
+        let matches2 = adapter.search_scrollback(id(1), "WORLD").unwrap();
+        assert_eq!(matches2.len(), 1);
+        assert_eq!(matches2[0].col_start, 6);
+        assert_eq!(matches2[0].col_end, 11);
+    }
+
+    #[test]
+    fn search_no_match_returns_empty() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"hello world").unwrap();
+
+        let matches = adapter.search_scrollback(id(1), "xyz").unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn search_empty_query_returns_empty() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"hello world").unwrap();
+
+        let matches = adapter.search_scrollback(id(1), "").unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn search_wide_char_correct_columns() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        // "テスト" is 3 wide chars, each occupying 2 cell columns
+        adapter.process(id(1), "テスト".as_bytes()).unwrap();
+
+        let matches = adapter.search_scrollback(id(1), "テスト").unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].col_start, 0);
+        // Each wide char = 2 columns, so "テスト" ends at column 6
+        assert_eq!(matches[0].col_end, 6);
+    }
+
+    #[test]
+    fn search_wide_char_after_ascii() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        // "abテスト" — 'a' at col 0, 'b' at col 1, 'テ' at cols 2-3, 'ス' at cols 4-5, 'ト' at cols 6-7
+        adapter.process(id(1), "abテスト".as_bytes()).unwrap();
+
+        let matches = adapter.search_scrollback(id(1), "テスト").unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].col_start, 2);
+        assert_eq!(matches[0].col_end, 8);
+    }
+
+    #[test]
+    fn search_scrollback_buffer_content() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        // Small screen: 3 rows
+        let size = TerminalSize::new(80, 3);
+        adapter.create(id(1), size).unwrap();
+
+        // Write enough lines to push "FINDME" into scrollback
+        adapter.process(id(1), b"FINDME line\r\n").unwrap();
+        for i in 0..5 {
+            let line = format!("line {}\r\n", i);
+            adapter.process(id(1), line.as_bytes()).unwrap();
+        }
+
+        // "FINDME" is now in the scrollback buffer (not visible)
+        let matches = adapter.search_scrollback(id(1), "FINDME").unwrap();
+        assert_eq!(matches.len(), 1);
+        // The match should be in the scrollback portion (row < max_scrollback)
+        let max_sb = adapter.get_max_scrollback(id(1)).unwrap();
+        assert!(max_sb > 0, "Expected scrollback buffer to have content");
+        assert!(matches[0].row < max_sb, "Expected match in scrollback (row {} < max {})", matches[0].row, max_sb);
+        assert_eq!(matches[0].col_start, 0);
+        assert_eq!(matches[0].col_end, 6);
+    }
+
+    #[test]
+    fn search_scrollback_preserves_offset() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let size = TerminalSize::new(80, 3);
+        adapter.create(id(1), size).unwrap();
+
+        // Generate scrollback
+        for i in 0..10 {
+            let line = format!("line {}\r\n", i);
+            adapter.process(id(1), line.as_bytes()).unwrap();
+        }
+
+        // Set a specific scrollback offset
+        adapter.set_scrollback_offset(id(1), 2).unwrap();
+        let offset_before = adapter.get_scrollback_offset(id(1)).unwrap();
+        assert_eq!(offset_before, 2);
+
+        // Search should not change the offset
+        let _matches = adapter.search_scrollback(id(1), "line").unwrap();
+
+        let offset_after = adapter.get_scrollback_offset(id(1)).unwrap();
+        assert_eq!(offset_after, offset_before, "search_scrollback should restore the scrollback offset");
+    }
+
+    #[test]
+    fn search_scrollback_and_visible_combined() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let size = TerminalSize::new(80, 3);
+        adapter.create(id(1), size).unwrap();
+
+        // Write lines where "target" appears in both scrollback and visible area
+        adapter.process(id(1), b"target in scrollback\r\n").unwrap();
+        for i in 0..4 {
+            let line = format!("filler {}\r\n", i);
+            adapter.process(id(1), line.as_bytes()).unwrap();
+        }
+        adapter.process(id(1), b"target on screen\r\n").unwrap();
+
+        let matches = adapter.search_scrollback(id(1), "target").unwrap();
+        assert_eq!(matches.len(), 2, "Expected matches in both scrollback and visible area");
+        // Results should be ordered by row ascending
+        assert!(matches[0].row < matches[1].row);
+    }
+
+    #[test]
+    fn search_nonexistent_terminal_returns_error() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        assert!(adapter.search_scrollback(id(99), "test").is_err());
+    }
+
+    #[test]
+    fn search_max_matches_limit() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        // Use a wide screen to fit many matches per line
+        let size = TerminalSize::new(200, 24);
+        adapter.create(id(1), size).unwrap();
+
+        // Fill rows with repeated "aa " to create many matches for "a"
+        // Each row with 200 cols can have ~100 'a' matches
+        // We need > 10000 matches total, so need many rows in scrollback
+        // 200 cols = "aa aa aa ..." pattern gives ~67 "aa" per line
+        // With 24 visible rows + scrollback, we need ~150 rows of "aa" repeated
+        // Since scrollback is 10000 lines, we can push enough
+        for _ in 0..200 {
+            let line = "aa ".repeat(66) + "\r\n";
+            adapter.process(id(1), line.as_bytes()).unwrap();
+        }
+
+        let matches = adapter.search_scrollback(id(1), "aa").unwrap();
+        assert!(matches.len() <= 10_000, "Expected at most 10000 matches, got {}", matches.len());
+        // We should have hit the cap
+        assert_eq!(matches.len(), 10_000);
+    }
+
+    #[test]
+    fn search_overlapping_pattern_finds_all() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        adapter.create(id(1), default_size()).unwrap();
+        adapter.process(id(1), b"aaaa").unwrap();
+
+        // Searching "aa" in "aaaa" should find overlapping matches:
+        // position 0: "aa", position 1: "aa", position 2: "aa"
+        let matches = adapter.search_scrollback(id(1), "aa").unwrap();
+        assert_eq!(matches.len(), 3);
+        assert_eq!(matches[0].col_start, 0);
+        assert_eq!(matches[1].col_start, 1);
+        assert_eq!(matches[2].col_start, 2);
+    }
+
+    #[test]
+    fn search_row_numbering_scrollback_top_is_zero() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let size = TerminalSize::new(80, 3);
+        adapter.create(id(1), size).unwrap();
+
+        // Write unique content at the very first line, then push it into scrollback
+        adapter.process(id(1), b"FIRST_LINE\r\n").unwrap();
+        for _ in 0..10 {
+            adapter.process(id(1), b"other content\r\n").unwrap();
+        }
+
+        let matches = adapter.search_scrollback(id(1), "FIRST_LINE").unwrap();
+        assert_eq!(matches.len(), 1);
+        // FIRST_LINE should be at row 0 (scrollback top)
+        assert_eq!(matches[0].row, 0, "Earliest scrollback line should be row 0");
     }
 }
