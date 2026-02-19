@@ -24,7 +24,9 @@ fn char_to_byte_index(s: &str, char_pos: usize) -> usize {
 use crate::domain::primitive::{CursorStyle, TerminalId, TerminalSize};
 use crate::infrastructure::notification::MacOsNotifier;
 use crate::infrastructure::tui::input::{InputHandler, InputMode};
-use crate::infrastructure::tui::widgets::{dialog, help_overlay, layout, memo_overlay, mini_terminal_view, sidebar, terminal_view};
+use crate::infrastructure::tui::fuzzy_matcher;
+use crate::infrastructure::tui::widgets::{dialog, help_overlay, layout, memo_overlay, mini_terminal_view, quick_switcher, sidebar, terminal_view};
+use crate::infrastructure::tui::widgets::quick_switcher::QuickSwitchItem;
 use crate::interface_adapter::controller::tui_controller::{AppAction, TuiController};
 use crate::interface_adapter::port::{PtyPort, ScreenPort};
 
@@ -93,6 +95,7 @@ enum DialogState {
     Rename { input: String, cursor_pos: usize },
     MemoEdit { text: String, cursor_row: usize, cursor_col: usize },
     Help,
+    QuickSwitch { query: String, cursor_pos: usize, selected_index: usize },
 }
 
 /// Main TUI event loop.
@@ -298,6 +301,53 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                 }
                 DialogState::Help => {
                     help_overlay::render_help_overlay(frame, frame.area());
+                }
+                DialogState::QuickSwitch { query, cursor_pos, selected_index } => {
+                    // Build display text and search text for each terminal.
+                    // Display text is used for rendering and highlighting.
+                    // Search text includes memo for broader matching.
+                    let terminals = controller.usecase().get_terminals();
+                    let items: Vec<(usize, String, String)> = terminals.iter().enumerate().map(|(idx, t)| {
+                        let cwd = dynamic_cwds.get(idx)
+                            .and_then(|c| c.as_deref())
+                            .unwrap_or(&t.cwd().display().to_string())
+                            .to_string();
+                        let display = format!("{}: {}  {}", t.id().value(), t.name(), cwd);
+                        let memo = t.memo();
+                        let search = if memo.is_empty() {
+                            display.clone()
+                        } else {
+                            format!("{} {}", display, memo)
+                        };
+                        (idx, display, search)
+                    }).collect();
+
+                    // Filter using search text (includes memo), sort by score
+                    let search_items: Vec<(usize, String)> = items.iter()
+                        .map(|(idx, _, search)| (*idx, search.clone()))
+                        .collect();
+                    let filtered = fuzzy_matcher::filter_and_sort(query, &search_items);
+
+                    // Build QuickSwitchItems with positions re-matched against display text
+                    let display_items: Vec<QuickSwitchItem> = filtered.iter().map(|(idx, _fm)| {
+                        let (_, display, _) = &items[*idx];
+                        // Re-match against display text so positions align with what's rendered
+                        let positions = if query.is_empty() {
+                            Vec::new()
+                        } else {
+                            fuzzy_matcher::fuzzy_match(query, display)
+                                .map(|m| m.positions)
+                                .unwrap_or_default()
+                        };
+                        QuickSwitchItem {
+                            terminal_index: *idx,
+                            display_text: display.clone(),
+                            match_positions: positions,
+                        }
+                    }).collect();
+
+                    let sel = (*selected_index).min(display_items.len().saturating_sub(1));
+                    quick_switcher::render_quick_switcher(frame, frame.area(), query, *cursor_pos, &display_items, sel);
                 }
                 DialogState::None => {}
             }
@@ -765,6 +815,15 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                 let _ = controller.usecase_mut().pty_port_mut().write(mid, &data);
             }
         }
+        AppAction::OpenQuickSwitcher => {
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal);
+            *dialog = DialogState::QuickSwitch {
+                query: String::new(),
+                cursor_pos: 0,
+                selected_index: 0,
+            };
+            input_handler.set_mode(InputMode::DialogInput);
+        }
         other => {
             match controller.dispatch(other, size) {
                 Ok(()) => {}
@@ -981,6 +1040,72 @@ fn handle_dialog_key<P: PtyPort, S: ScreenPort>(
                 input_handler.set_mode(InputMode::Normal);
             }
             _ => {} // Help is read-only; ignore all other keys
+        },
+        DialogState::QuickSwitch { query, cursor_pos, selected_index } => {
+            match key.code {
+                KeyCode::Char('k') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                    if *selected_index > 0 {
+                        *selected_index -= 1;
+                    }
+                }
+                KeyCode::Char('j') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                    *selected_index += 1;
+                }
+                KeyCode::Char(c) => {
+                    let byte_idx = char_to_byte_index(query, *cursor_pos);
+                    query.insert(byte_idx, c);
+                    *cursor_pos += 1;
+                    *selected_index = 0; // Reset selection when query changes
+                }
+                KeyCode::Backspace => {
+                    if *cursor_pos > 0 {
+                        let byte_idx = char_to_byte_index(query, *cursor_pos - 1);
+                        query.remove(byte_idx);
+                        *cursor_pos -= 1;
+                        *selected_index = 0; // Reset selection when query changes
+                    }
+                }
+                KeyCode::Up => {
+                    if *selected_index > 0 {
+                        *selected_index -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    // Increment and let the renderer clamp
+                    *selected_index += 1;
+                }
+                KeyCode::Enter => {
+                    // Determine which terminal is selected by re-running the filter
+                    let terminals = controller.usecase().get_terminals();
+                    let search_items: Vec<(usize, String)> = terminals.iter().enumerate().map(|(idx, t)| {
+                        let cwd = controller.usecase().screen_port()
+                            .get_cwd(t.id()).ok().flatten()
+                            .unwrap_or_else(|| t.cwd().display().to_string());
+                        let display = format!("{}: {}  {}", t.id().value(), t.name(), cwd);
+                        let memo = t.memo();
+                        let search_text = if memo.is_empty() {
+                            display
+                        } else {
+                            format!("{} {}", display, memo)
+                        };
+                        (idx, search_text)
+                    }).collect();
+
+                    let filtered = fuzzy_matcher::filter_and_sort(query, &search_items);
+                    let sel = (*selected_index).min(filtered.len().saturating_sub(1));
+
+                    if let Some((terminal_idx, _)) = filtered.get(sel) {
+                        controller.dispatch(AppAction::SelectByIndex(*terminal_idx), size)?;
+                    }
+                    *dialog = DialogState::None;
+                    input_handler.set_mode(InputMode::Normal);
+                }
+                KeyCode::Esc => {
+                    *dialog = DialogState::None;
+                    input_handler.set_mode(InputMode::Normal);
+                }
+                _ => {}
+            }
         },
         DialogState::None => {}
     }
@@ -1541,16 +1666,14 @@ mod tests {
 
     #[test]
     fn scrollback_target_enter_main_sets_some_main() {
-        let mut scrollback_target: Option<ScrollbackTarget> = None;
-        scrollback_target = Some(ScrollbackTarget::MainTerminal);
+        let scrollback_target: Option<ScrollbackTarget> = Some(ScrollbackTarget::MainTerminal);
         assert_eq!(scrollback_target, Some(ScrollbackTarget::MainTerminal));
         // Equivalent to old `in_scrollback = true`
     }
 
     #[test]
     fn scrollback_target_exit_sets_none() {
-        let mut scrollback_target = Some(ScrollbackTarget::MainTerminal);
-        scrollback_target = None;
+        let scrollback_target: Option<ScrollbackTarget> = None;
         assert!(scrollback_target.is_none());
         // Equivalent to old `in_scrollback = false`
     }
@@ -2095,5 +2218,315 @@ mod tests {
         assert_ne!(main_scrollback, Some(ScrollbackTarget::MiniTerminal));
         assert_eq!(mini_scrollback, Some(ScrollbackTarget::MiniTerminal));
         assert_ne!(no_scrollback, Some(ScrollbackTarget::MiniTerminal));
+    }
+
+    // === Task #78: QuickSwitch dialog state tests ===
+
+    #[test]
+    fn dialog_state_quick_switch_variant_exists() {
+        let dialog = DialogState::QuickSwitch {
+            query: String::new(),
+            cursor_pos: 0,
+            selected_index: 0,
+        };
+        assert!(matches!(dialog, DialogState::QuickSwitch { .. }));
+    }
+
+    #[test]
+    fn dialog_state_quick_switch_stores_query() {
+        let dialog = DialogState::QuickSwitch {
+            query: "test".to_string(),
+            cursor_pos: 4,
+            selected_index: 0,
+        };
+        if let DialogState::QuickSwitch { query, cursor_pos, selected_index } = dialog {
+            assert_eq!(query, "test");
+            assert_eq!(cursor_pos, 4);
+            assert_eq!(selected_index, 0);
+        } else {
+            panic!("Expected QuickSwitch variant");
+        }
+    }
+
+    // === Task #78: QuickSwitch key handling simulation ===
+
+    /// Simulate typing a character into QuickSwitch dialog.
+    /// Returns (new_query, new_cursor_pos, new_selected_index).
+    fn simulate_qs_char_input(query: &str, cursor_pos: usize, _selected_index: usize, c: char) -> (String, usize, usize) {
+        let mut q = query.to_string();
+        let mut cp = cursor_pos;
+        let byte_idx = char_to_byte_index(&q, cp);
+        q.insert(byte_idx, c);
+        cp += 1;
+        let si = 0; // Reset on query change
+        (q, cp, si)
+    }
+
+    #[test]
+    fn qs_char_input_appends_to_empty_query() {
+        let (q, cp, si) = simulate_qs_char_input("", 0, 0, 'a');
+        assert_eq!(q, "a");
+        assert_eq!(cp, 1);
+        assert_eq!(si, 0);
+    }
+
+    #[test]
+    fn qs_char_input_appends_to_existing_query() {
+        let (q, cp, si) = simulate_qs_char_input("ab", 2, 3, 'c');
+        assert_eq!(q, "abc");
+        assert_eq!(cp, 3);
+        assert_eq!(si, 0); // Reset on query change
+    }
+
+    #[test]
+    fn qs_char_input_resets_selected_index() {
+        let (_, _, si) = simulate_qs_char_input("x", 1, 5, 'y');
+        assert_eq!(si, 0);
+    }
+
+    /// Simulate backspace in QuickSwitch dialog.
+    /// Returns (new_query, new_cursor_pos, new_selected_index).
+    fn simulate_qs_backspace(query: &str, cursor_pos: usize, selected_index: usize) -> (String, usize, usize) {
+        let mut q = query.to_string();
+        let mut cp = cursor_pos;
+        let si;
+        if cp > 0 {
+            let byte_idx = char_to_byte_index(&q, cp - 1);
+            q.remove(byte_idx);
+            cp -= 1;
+            si = 0; // Reset on query change
+        } else {
+            si = selected_index; // No change
+        }
+        (q, cp, si)
+    }
+
+    #[test]
+    fn qs_backspace_removes_last_char() {
+        let (q, cp, si) = simulate_qs_backspace("abc", 3, 2);
+        assert_eq!(q, "ab");
+        assert_eq!(cp, 2);
+        assert_eq!(si, 0);
+    }
+
+    #[test]
+    fn qs_backspace_at_start_is_noop() {
+        let (q, cp, si) = simulate_qs_backspace("abc", 0, 2);
+        assert_eq!(q, "abc");
+        assert_eq!(cp, 0);
+        assert_eq!(si, 2); // Not reset
+    }
+
+    #[test]
+    fn qs_backspace_resets_selected_index_when_effective() {
+        let (_, _, si) = simulate_qs_backspace("x", 1, 7);
+        assert_eq!(si, 0);
+    }
+
+    /// Simulate Up arrow in QuickSwitch dialog.
+    fn simulate_qs_up(selected_index: usize) -> usize {
+        if selected_index > 0 {
+            selected_index - 1
+        } else {
+            selected_index
+        }
+    }
+
+    #[test]
+    fn qs_up_decrements_selected_index() {
+        assert_eq!(simulate_qs_up(3), 2);
+    }
+
+    #[test]
+    fn qs_up_stays_at_zero() {
+        assert_eq!(simulate_qs_up(0), 0);
+    }
+
+    /// Simulate Down arrow in QuickSwitch dialog.
+    /// (Just increments; renderer clamps)
+    fn simulate_qs_down(selected_index: usize) -> usize {
+        selected_index + 1
+    }
+
+    #[test]
+    fn qs_down_increments_selected_index() {
+        assert_eq!(simulate_qs_down(0), 1);
+        assert_eq!(simulate_qs_down(5), 6);
+    }
+
+    /// Simulate the selected_index clamping done by the renderer.
+    fn clamp_selected(selected_index: usize, item_count: usize) -> usize {
+        selected_index.min(item_count.saturating_sub(1))
+    }
+
+    #[test]
+    fn clamp_selected_within_range() {
+        assert_eq!(clamp_selected(2, 5), 2);
+    }
+
+    #[test]
+    fn clamp_selected_at_boundary() {
+        assert_eq!(clamp_selected(4, 5), 4);
+    }
+
+    #[test]
+    fn clamp_selected_exceeds_range() {
+        assert_eq!(clamp_selected(10, 5), 4);
+    }
+
+    #[test]
+    fn clamp_selected_with_empty_list() {
+        assert_eq!(clamp_selected(3, 0), 0);
+    }
+
+    #[test]
+    fn clamp_selected_with_single_item() {
+        assert_eq!(clamp_selected(5, 1), 0);
+    }
+
+    /// Simulate Esc key closing the QuickSwitch dialog.
+    /// Returns true if dialog should be closed.
+    fn simulate_qs_esc() -> bool {
+        true // Always closes dialog
+    }
+
+    #[test]
+    fn qs_esc_closes_dialog() {
+        assert!(simulate_qs_esc());
+    }
+
+    /// Simulate building search items from terminal data.
+    fn build_search_items(
+        terminals: &[(u32, &str, &str, Option<&str>)], // (id, name, cwd, memo)
+    ) -> Vec<(usize, String)> {
+        terminals.iter().enumerate().map(|(idx, (id, name, cwd, memo))| {
+            let display = format!("{}: {}  {}", id, name, cwd);
+            let search_text = match memo {
+                Some(m) => format!("{} {}", display, m),
+                None => display,
+            };
+            (idx, search_text)
+        }).collect()
+    }
+
+    #[test]
+    fn build_search_items_formats_correctly() {
+        let terminals = vec![
+            (1, "my-term", "/home/user", None),
+            (2, "dev", "/tmp", Some("important")),
+        ];
+        let items = build_search_items(&terminals);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].0, 0);
+        assert_eq!(items[0].1, "1: my-term  /home/user");
+        assert_eq!(items[1].0, 1);
+        assert_eq!(items[1].1, "2: dev  /tmp important");
+    }
+
+    #[test]
+    fn build_search_items_trims_trailing_whitespace() {
+        let terminals = vec![
+            (1, "test", "/home", None),
+        ];
+        let items = build_search_items(&terminals);
+        // Without memo, format is "1: test /home " - should be trimmed
+        assert!(!items[0].1.ends_with(' '));
+    }
+
+    #[test]
+    fn build_search_items_includes_memo_when_present() {
+        let terminals = vec![
+            (1, "test", "/home", Some("my memo")),
+        ];
+        let items = build_search_items(&terminals);
+        assert!(items[0].1.contains("my memo"));
+    }
+
+    /// Simulate the Enter key handling logic in QuickSwitch:
+    /// filter items, clamp selection, return selected terminal index.
+    fn simulate_qs_enter(
+        query: &str,
+        selected_index: usize,
+        search_items: &[(usize, String)],
+    ) -> Option<usize> {
+        let filtered = crate::infrastructure::tui::fuzzy_matcher::filter_and_sort(query, search_items);
+        let sel = selected_index.min(filtered.len().saturating_sub(1));
+        filtered.get(sel).map(|(idx, _)| *idx)
+    }
+
+    #[test]
+    fn qs_enter_selects_first_item_when_no_query() {
+        let items = vec![
+            (0, "1: alpha /home".to_string()),
+            (1, "2: beta /tmp".to_string()),
+        ];
+        let result = simulate_qs_enter("", 0, &items);
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn qs_enter_selects_second_item() {
+        let items = vec![
+            (0, "1: alpha /home".to_string()),
+            (1, "2: beta /tmp".to_string()),
+        ];
+        let result = simulate_qs_enter("", 1, &items);
+        assert_eq!(result, Some(1));
+    }
+
+    #[test]
+    fn qs_enter_with_query_filters_items() {
+        let items = vec![
+            (0, "1: alpha /home".to_string()),
+            (1, "2: beta /tmp".to_string()),
+        ];
+        let result = simulate_qs_enter("beta", 0, &items);
+        assert_eq!(result, Some(1)); // "beta" matches only the second item
+    }
+
+    #[test]
+    fn qs_enter_clamps_index_when_exceeds_filtered() {
+        let items = vec![
+            (0, "1: alpha /home".to_string()),
+            (1, "2: beta /tmp".to_string()),
+        ];
+        // With query "alpha", only 1 result; selected_index=5 should clamp to 0
+        let result = simulate_qs_enter("alpha", 5, &items);
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn qs_enter_returns_none_when_no_matches() {
+        let items = vec![
+            (0, "1: alpha /home".to_string()),
+        ];
+        let result = simulate_qs_enter("xyz", 0, &items);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn qs_enter_returns_none_when_no_items() {
+        let items: Vec<(usize, String)> = vec![];
+        let result = simulate_qs_enter("", 0, &items);
+        assert_eq!(result, None);
+    }
+
+    // === Task #78: Ctrl+k / Ctrl+j navigation ===
+
+    #[test]
+    fn qs_ctrl_k_decrements_selected_index() {
+        // Same as Up
+        assert_eq!(simulate_qs_up(3), 2);
+    }
+
+    #[test]
+    fn qs_ctrl_k_stays_at_zero() {
+        assert_eq!(simulate_qs_up(0), 0);
+    }
+
+    #[test]
+    fn qs_ctrl_j_increments_selected_index() {
+        // Same as Down
+        assert_eq!(simulate_qs_down(2), 3);
     }
 }

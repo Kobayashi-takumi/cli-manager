@@ -10,6 +10,7 @@ TUI ベースのターミナルマルチプレクサ。複数の CLI プロセ�
 - [クイックスタート](#クイックスタート)
 - [操作方法](#操作方法)
   - [キーバインド一覧](#キーバインド一覧)
+  - [クイックスイッチャー](#クイックスイッチャー)
   - [ミニターミナル](#ミニターミナル)
   - [プレフィックスキーの仕組み](#プレフィックスキーの仕組み)
 - [UI レイアウト](#ui-レイアウト)
@@ -46,6 +47,7 @@ TUI ベースのターミナルマルチプレクサ。複数の CLI プロセ�
 | リネーム | ターミナル名を後から変更可能 |
 | メモ | 各ターミナルに複数行メモを付与・編集。サイドバーに `[≡]` インジケータ表示 |
 | ヘルプオーバーレイ | `Ctrl+b` → `?` でキーバインド一覧をオーバーレイ表示 |
+| クイックスイッチャー | `Ctrl+b` → `f` でファジー検索オーバーレイ。名前・CWD・メモで絞り込み即座に切替 |
 | ミニターミナル | フッター型クイックシェル。`` Ctrl+b `` → `` ` `` でトグル。スクロールバック対応 |
 
 ## 必要環境
@@ -96,6 +98,7 @@ cargo run
 | `Ctrl+b` → `n` | 次のターミナルを選択 |
 | `Ctrl+b` → `p` | 前のターミナルを選択 |
 | `Ctrl+b` → `1`〜`9` | 番号指定でターミナルをジャンプ |
+| `Ctrl+b` → `f` | クイックスイッチャーを開く（ファジー検索で切替） |
 | `Ctrl+b` → `Ctrl+b` | 子プロセスに `Ctrl+b` を送信 |
 | `Ctrl+b` → `[` | スクロールバックモードに入る |
 | `Ctrl+b` → `r` | アクティブターミナルをリネーム |
@@ -149,6 +152,20 @@ cargo run
 - **OSC 7 CWD:** ミニターミナルも動的 CWD に対応
 - **自動クリーンアップ:** ミニターミナル内のプロセスが終了すると自動的に閉じる
 
+#### クイックスイッチャー
+
+`Ctrl+b` → `f` でクイックスイッチャーオーバーレイが表示されます。ターミナル一覧をファジー検索で絞り込み、素早く切り替えられます。VS Code の `Ctrl+P` や tmux の `choose-tree` に相当する機能です。
+
+| キーバインド | アクション |
+|---|---|
+| 文字入力 | インクリメンタルにフィルタ |
+| `↑` / `Ctrl+k` | 選択カーソルを上に移動 |
+| `↓` / `Ctrl+j` | 選択カーソルを下に移動 |
+| `Enter` | 選択ターミナルに切り替え |
+| `Esc` | キャンセル（何も変更しない） |
+
+**検索対象:** ターミナル ID、名前、動的 CWD、メモ。マッチした文字は Cyan + Bold でハイライト表示されます。
+
 #### ヘルプオーバーレイ
 
 `Ctrl+b` → `?` でヘルプオーバーレイが表示されます。全キーバインドを TERMINAL / NAVIGATION / SCROLLBACK / GENERAL の 4 カテゴリに分類して一覧表示します。`?` または `Esc` で閉じます。
@@ -165,6 +182,7 @@ stateDiagram-v2
     PrefixWait --> ScrollbackMode : [ 押下
     PrefixWait --> DialogInput : r 押下 (リネーム)
     PrefixWait --> MemoEdit : m 押下 (メモ編集)
+    PrefixWait --> DialogInput : f 押下 (クイックスイッチャー)
     PrefixWait --> HelpView : ? 押下 (ヘルプ)
     PrefixWait --> MiniTerminalInput : ` 押下 (ミニターミナル)
     HelpView --> Normal : ? / Esc 押下
@@ -293,7 +311,7 @@ graph TD
         VT100["Vt100ScreenAdapter<br/>(vt100)"]
         TUI["TUI<br/>(ratatui + crossterm)"]
         INPUT["InputHandler"]
-        WIDGETS["Widgets<br/>(sidebar, terminal_view,<br/>mini_terminal_view, dialog,<br/>memo_overlay, help_overlay)"]
+        WIDGETS["Widgets<br/>(sidebar, terminal_view,<br/>mini_terminal_view, dialog,<br/>memo_overlay, help_overlay,<br/>quick_switcher)"]
         NOTIF["MacOsNotifier<br/>(notify-rust)"]
     end
 
@@ -442,6 +460,7 @@ src/
 │   ├── tui/
 │   │   ├── app_runner.rs                # メインイベントループ
 │   │   ├── input.rs                     # InputHandler (キー入力処理)
+│   │   ├── fuzzy_matcher.rs             # ファジーマッチエンジン (クイックスイッチャー用)
 │   │   └── widgets/                     # UI ウィジェット
 │   │       ├── layout.rs                # 2ペインレイアウト
 │   │       ├── sidebar.rs               # サイドバー (ターミナル一覧 + 通知マーク)
@@ -449,7 +468,8 @@ src/
 │   │       ├── mini_terminal_view.rs   # ミニターミナル (フッター型クイックシェル)
 │   │       ├── dialog.rs                # 確認・リネームダイアログ
 │   │       ├── memo_overlay.rs          # メモ編集オーバーレイ
-│   │       └── help_overlay.rs          # ヘルプオーバーレイ
+│   │       ├── help_overlay.rs          # ヘルプオーバーレイ
+│   │       └── quick_switcher.rs        # クイックスイッチャーオーバーレイ
 │   └── notification/
 │       └── macos_notifier.rs            # macOS デスクトップ通知 (notify-rust)
 └── shared/
@@ -467,7 +487,7 @@ cargo check
 # ビルド
 cargo build
 
-# テスト（全 769 件）
+# テスト（全 873 件）
 cargo test
 
 # 特定のテストのみ実行
@@ -479,39 +499,40 @@ cargo clippy
 
 ### テスト構成
 
-合計 **769** ユニットテスト。各モジュールごとの内訳は以下の通りです。
+合計 **873** ユニットテスト。各モジュールごとの内訳は以下の通りです。
 
 ```mermaid
-pie title ユニットテスト構成 (769件)
+pie title ユニットテスト構成 (873件)
     "VteScreenAdapter (177)" : 177
+    "AppRunner (129)" : 129
     "Vt100ScreenAdapter (103)" : 103
-    "AppRunner (99)" : 99
-    "InputHandler (95)" : 95
+    "InputHandler (96)" : 96
     "TerminalUsecase (61)" : 61
-    "TuiController (37)" : 37
+    "QuickSwitcher (40)" : 40
+    "TuiController (38)" : 38
     "Sidebar (32)" : 32
     "MiniTerminalView (31)" : 31
     "TerminalView (31)" : 31
-    "ManagedTerminal (17)" : 17
-    "MacOsNotifier (17)" : 17
-    "その他 (69)" : 69
+    "その他 (135)" : 135
 ```
 
 | モジュール | テスト数 | テスト対象 |
 |-----------|---------|-----------|
 | `VteScreenAdapter` | 177 | ANSI パース、セルグリッド、カーソル移動、代替画面、スクロールリージョン、ワイド文字、OSC タイトル、通知 |
+| `AppRunner` | 129 | イベントループシミュレーション、スクロールバック（メイン/ミニ）、フォーカス制御、ミニターミナル管理、クイックスイッチャー統合 |
 | `Vt100ScreenAdapter` | 103 | vt100 ベースパース、セル属性、OSC 7 CWD、OSC タイトル、通知、スクロールバック、カーソルスタイル、DSR 応答 |
-| `AppRunner` | 99 | イベントループシミュレーション、スクロールバック（メイン/ミニ）、フォーカス制御、ミニターミナル管理 |
-| `InputHandler` | 95 | ステートマシン、プレフィックスキー、タイムアウト、アプリケーションカーソルキー、ブラケットペースト、スクロールバックモード、メモ編集モード、ヘルプ表示、ミニターミナル入力 |
+| `InputHandler` | 96 | ステートマシン、プレフィックスキー、タイムアウト、アプリケーションカーソルキー、ブラケットペースト、スクロールバックモード、メモ編集モード、ヘルプ表示、ミニターミナル入力 |
 | `TerminalUsecase` | 61 | CRUD 操作、ポーリング、通知収集、リネーム、メモ操作、エラーハンドリング |
-| `TuiController` | 37 | AppAction ディスパッチ、状態管理、リネーム・メモ・ヘルプ・ミニターミナル操作 |
+| `QuickSwitcher` | 40 | オーバーレイ描画、クエリ入力、選択ハイライト、マッチ文字ハイライト、スクロール、小画面対応 |
+| `TuiController` | 38 | AppAction ディスパッチ、状態管理、リネーム・メモ・ヘルプ・ミニターミナル・クイックスイッチャー操作 |
 | `Sidebar` | 32 | ターミナル一覧描画、動的 CWD 表示、通知マーク、メモインジケータ |
 | `MiniTerminalView` | 31 | ミニターミナル描画、セルグリッド、ワイド文字、カーソル位置、スクロールバック表示 |
 | `TerminalView` | 31 | 出力表示、ワイド文字クリッピング、カーソル位置、スクロールバック表示 |
 | `ManagedTerminal` | 17 | エンティティ操作、通知フラグ、リネーム、メモ |
 | `MacOsNotifier` | 17 | デスクトップ通知送信、レート制限 |
+| `HelpOverlay` | 16 | ヘルプオーバーレイ描画、カテゴリ表示、キーバインド一覧、クイックスイッチャー表示、小画面対応 |
 | `NotificationEvent` | 15 | Bell/Osc9/Osc777 イベント |
-| `HelpOverlay` | 15 | ヘルプオーバーレイ描画、カテゴリ表示、キーバインド一覧、小画面対応 |
+| `FuzzyMatcher` | 13 | サブシーケンスマッチ、スコアリング、フィルタ＆ソート、日本語、エッジケース |
 | `Dialog` | 11 | 確認・リネームダイアログ描画 |
 | `Layout` | 10 | 2ペインレイアウト計算、ミニターミナル分割 |
 | `OSC 7 Parser` | 10 | URI パース、パーセントデコード |

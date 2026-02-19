@@ -79,6 +79,7 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
             ("n/\u{2193}", "Next terminal"),
             ("p/\u{2191}", "Previous terminal"),
             ("1-9", "Jump to #N"),
+            ("f", "Quick switch"),
             ("o", "Toggle pane"),
         ],
     );
@@ -380,6 +381,16 @@ mod tests {
         assert!(
             content.contains("Mini Terminal"),
             "Expected 'Mini Terminal' keybinding in TERMINAL category"
+        );
+    }
+
+    #[test]
+    fn help_overlay_renders_quick_switch_keybinding() {
+        let buf = render_help(80, 24);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("Quick switch"),
+            "Expected 'Quick switch' keybinding in NAVIGATION category"
         );
     }
 }

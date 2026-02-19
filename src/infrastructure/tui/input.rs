@@ -152,6 +152,7 @@ impl InputHandler {
             KeyCode::Char('m') if key.modifiers.is_empty() => Some(AppAction::OpenMemo),
             KeyCode::Char('?') if key.modifiers.is_empty() => Some(AppAction::ShowHelp),
             KeyCode::Char('`') if key.modifiers.is_empty() => Some(AppAction::ToggleMiniTerminal),
+            KeyCode::Char('f') if key.modifiers.is_empty() => Some(AppAction::OpenQuickSwitcher),
             // Ctrl+b again -> send literal Ctrl+b to child process
             KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(AppAction::WriteToActive(vec![0x02]))
@@ -1512,6 +1513,22 @@ mod tests {
         // backtick -> ToggleMiniTerminal (returns to Normal)
         let action = handler.handle_key(make_key(KeyCode::Char('`'), KeyModifiers::NONE));
         assert!(matches!(action, Some(AppAction::ToggleMiniTerminal)));
+        assert_normal(&handler);
+    }
+
+    // =========================================================================
+    // Tests: Prefix f binding (Phase 15 - Quick Switcher)
+    // =========================================================================
+
+    #[test]
+    fn prefix_f_produces_open_quick_switcher() {
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        let key = make_key(KeyCode::Char('f'), KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+
+        assert!(matches!(action, Some(AppAction::OpenQuickSwitcher)));
         assert_normal(&handler);
     }
 }

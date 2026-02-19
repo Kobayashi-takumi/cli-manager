@@ -32,6 +32,7 @@ pub enum AppAction {
     ShowHelp,
     ToggleMiniTerminal,
     WriteToMiniTerminal(Vec<u8>),
+    OpenQuickSwitcher,
 }
 
 /// Thin controller that translates `AppAction`s into usecase calls.
@@ -98,6 +99,7 @@ impl<P: PtyPort, S: ScreenPort> TuiController<P, S> {
             AppAction::ShowHelp => {}              // Handled by caller (app_runner)
             AppAction::ToggleMiniTerminal => {}    // Handled by caller (app_runner)
             AppAction::WriteToMiniTerminal(_) => {} // Handled by caller (app_runner)
+            AppAction::OpenQuickSwitcher => {}     // Handled by caller (app_runner)
         }
         Ok(())
     }
@@ -997,5 +999,17 @@ mod tests {
         );
         assert!(result.is_ok());
         assert_eq!(ctrl.usecase().get_terminals().len(), 1);
+    }
+
+    // =========================================================================
+    // Tests: dispatch(OpenQuickSwitcher)
+    // =========================================================================
+
+    #[test]
+    fn dispatch_open_quick_switcher_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::OpenQuickSwitcher, size);
+        assert!(result.is_ok());
     }
 }
