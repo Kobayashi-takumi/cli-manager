@@ -23,41 +23,73 @@ pub fn render(
     cursor_visible: bool,
     is_focused: bool,
     scrollback_info: Option<(usize, usize)>,
+    in_scrollback: bool,
 ) {
     // Guard against areas too small to render borders + content
     if area.width < 3 || area.height < 3 {
         return;
     }
 
-    let border_color = if is_focused {
+    let border_color = if in_scrollback {
+        RatColor::LightCyan
+    } else if is_focused {
         RatColor::Yellow
     } else {
         RatColor::DarkGray
     };
 
-    let hint_style = Style::default()
-        .fg(border_color)
-        .add_modifier(Modifier::DIM);
+    let block = if in_scrollback {
+        let hint_style = Style::default()
+            .fg(RatColor::LightCyan)
+            .add_modifier(Modifier::DIM);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(" Mini Terminal ")
-        .title_bottom(Line::from(Span::styled(" ^b ` to close ", hint_style)).right_aligned())
-        .border_style(Style::default().fg(border_color));
-
-    let block = if let Some((offset, max)) = scrollback_info {
-        let indicator = format!("[{}/{}]", offset, max);
-        block.title(
-            Line::from(Span::styled(
-                indicator,
-                Style::default()
-                    .fg(RatColor::Yellow)
-                    .add_modifier(Modifier::BOLD),
+        let mut block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(Span::styled(
+                " SCROLLBACK ",
+                Style::default().fg(RatColor::LightCyan).add_modifier(Modifier::BOLD),
             ))
-            .right_aligned(),
-        )
+            .title_bottom(Line::from(Span::styled(" ↑↓:scroll q:exit ", hint_style)).right_aligned())
+            .border_style(Style::default().fg(border_color));
+
+        if let Some((offset, max)) = scrollback_info {
+            let indicator = format!("[{}/{}]", offset, max);
+            block = block.title(
+                Line::from(Span::styled(
+                    indicator,
+                    Style::default()
+                        .fg(RatColor::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .right_aligned(),
+            );
+        }
+        block
     } else {
+        let hint_style = Style::default()
+            .fg(border_color)
+            .add_modifier(Modifier::DIM);
+
+        let mut block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(" Mini Terminal ")
+            .title_bottom(Line::from(Span::styled(" ^b ` to close ", hint_style)).right_aligned())
+            .border_style(Style::default().fg(border_color));
+
+        if let Some((offset, max)) = scrollback_info {
+            let indicator = format!("[{}/{}]", offset, max);
+            block = block.title(
+                Line::from(Span::styled(
+                    indicator,
+                    Style::default()
+                        .fg(RatColor::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .right_aligned(),
+            );
+        }
         block
     };
 
@@ -213,7 +245,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 40, 10);
-                render(frame, area, None, None, false, true, None);
+                render(frame, area, None, None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -235,7 +267,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 40, 10);
-                render(frame, area, None, None, false, true, None);
+                render(frame, area, None, None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -263,7 +295,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 40, 10);
-                render(frame, area, None, None, false, true, None); // is_focused = true
+                render(frame, area, None, None, false, true, None, false); // is_focused = true
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -278,7 +310,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 40, 10);
-                render(frame, area, None, None, false, false, None); // is_focused = false
+                render(frame, area, None, None, false, false, None, false); // is_focused = false
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -292,7 +324,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 2, 2);
-                render(frame, area, None, None, false, true, None);
+                render(frame, area, None, None, false, true, None, false);
             })
             .unwrap();
         // Should not panic -- the guard returns early for areas < 3x3
@@ -305,7 +337,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 2, 5);
-                render(frame, area, None, None, false, true, None);
+                render(frame, area, None, None, false, true, None, false);
             })
             .unwrap();
     }
@@ -317,7 +349,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 2);
-                render(frame, area, None, None, false, true, None);
+                render(frame, area, None, None, false, true, None, false);
             })
             .unwrap();
     }
@@ -339,7 +371,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), None, false, true, None);
+                render(frame, area, Some(&cells), None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -360,7 +392,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), None, false, true, None);
+                render(frame, area, Some(&cells), None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -379,7 +411,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), None, false, true, None);
+                render(frame, area, Some(&cells), None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -398,7 +430,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), None, false, true, None);
+                render(frame, area, Some(&cells), None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -417,7 +449,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), None, false, true, None);
+                render(frame, area, Some(&cells), None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -436,7 +468,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), None, false, true, None);
+                render(frame, area, Some(&cells), None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -456,7 +488,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), None, false, true, None);
+                render(frame, area, Some(&cells), None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -478,7 +510,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), None, false, true, None);
+                render(frame, area, Some(&cells), None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -500,7 +532,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), None, false, true, None);
+                render(frame, area, Some(&cells), None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -522,7 +554,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), None, false, true, None);
+                render(frame, area, Some(&cells), None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -537,7 +569,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, None, None, false, true, None);
+                render(frame, area, None, None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -568,7 +600,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), Some(cursor), true, true, None);
+                render(frame, area, Some(&cells), Some(cursor), true, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -596,7 +628,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), Some(cursor), false, true, None);
+                render(frame, area, Some(&cells), Some(cursor), false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -629,7 +661,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), None, false, true, None);
+                render(frame, area, Some(&cells), None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -659,7 +691,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), None, false, true, None);
+                render(frame, area, Some(&cells), None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -684,7 +716,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, Some(&cells), None, false, true, None);
+                render(frame, area, Some(&cells), None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -710,7 +742,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 6, 5);
-                render(frame, area, Some(&cells), None, false, true, None);
+                render(frame, area, Some(&cells), None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -737,7 +769,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 6);
-                render(frame, area, Some(&cells), Some(cursor), true, true, None);
+                render(frame, area, Some(&cells), Some(cursor), true, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -768,6 +800,7 @@ mod tests {
                     false,
                     true,
                     Some((5, 100)),
+                    false,
                 );
             })
             .unwrap();
@@ -789,7 +822,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 40, 10);
-                render(frame, area, None, None, false, true, None);
+                render(frame, area, None, None, false, true, None, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -810,7 +843,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 40, 10);
-                render(frame, area, None, None, false, true, Some((10, 50)));
+                render(frame, area, None, None, false, true, Some((10, 50)), false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -820,5 +853,100 @@ mod tests {
         let x = bracket_x.unwrap();
         assert_eq!(buf[(x, 0)].fg, RatColor::Yellow);
         assert!(buf[(x, 0)].modifier.contains(Modifier::BOLD));
+    }
+
+    // === Scrollback mode UI tests ===
+
+    #[test]
+    fn render_scrollback_mode_has_lightcyan_border() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 40, 10);
+                render(frame, area, None, None, false, true, Some((5, 50)), true);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        // Top-left corner should be LightCyan
+        assert_eq!(buf[(0, 0)].fg, RatColor::LightCyan);
+    }
+
+    #[test]
+    fn render_scrollback_mode_shows_scrollback_title() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 40, 10);
+                render(frame, area, None, None, false, true, Some((5, 50)), true);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let top_row: String = (0..40)
+            .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            top_row.contains("SCROLLBACK"),
+            "Expected 'SCROLLBACK' in title, got: {}",
+            top_row
+        );
+    }
+
+    #[test]
+    fn render_scrollback_mode_shows_key_hints() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 40, 10);
+                render(frame, area, None, None, false, true, Some((5, 50)), true);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let bottom_row: String = (0..40)
+            .map(|x| buf[(x, 9)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            bottom_row.contains("q:exit"),
+            "Expected 'q:exit' in bottom border, got: {}",
+            bottom_row
+        );
+    }
+
+    #[test]
+    fn render_scrollback_mode_not_focused_still_uses_lightcyan() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 40, 10);
+                render(frame, area, None, None, false, false, Some((5, 50)), true); // is_focused = false
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        // Border should still be LightCyan in scrollback mode regardless of focus
+        assert_eq!(buf[(0, 0)].fg, RatColor::LightCyan);
+    }
+
+    #[test]
+    fn render_normal_mode_still_shows_mini_terminal_title() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 40, 10);
+                render(frame, area, None, None, false, true, None, false); // in_scrollback = false
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let top_row: String = (0..40)
+            .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            top_row.contains("Mini Terminal"),
+            "Expected 'Mini Terminal' in title when not in scrollback, got: {}",
+            top_row
+        );
     }
 }

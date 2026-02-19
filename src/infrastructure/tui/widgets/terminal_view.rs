@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color as RatColor, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::domain::primitive::{Cell, Color, CursorPos};
 
@@ -16,6 +16,119 @@ fn to_ratatui_color(color: Color) -> RatColor {
 }
 
 pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    cells_opt: Option<&Vec<Vec<Cell>>>,
+    cursor_opt: Option<CursorPos>,
+    cursor_visible: bool,
+    cwd_opt: Option<&str>,
+    is_focused: bool,
+    scrollback_info: Option<(usize, usize)>,
+    in_scrollback: bool,
+) {
+    if in_scrollback && area.width >= 4 && area.height >= 5 {
+        render_scrollback_mode(frame, area, cells_opt, cwd_opt, is_focused, scrollback_info);
+    } else {
+        render_normal_mode(frame, area, cells_opt, cursor_opt, cursor_visible, cwd_opt, is_focused, scrollback_info);
+    }
+}
+
+/// Build a progress bar string: `████░░░░░░` where filled proportion = offset/max.
+fn build_progress_bar(width: usize, offset: usize, max: usize) -> String {
+    if width == 0 || max == 0 {
+        return String::new();
+    }
+    let filled = ((offset as f64 / max as f64) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    let empty = width - filled;
+    let mut bar = String::with_capacity(width * 3); // UTF-8 chars may be multi-byte
+    for _ in 0..filled {
+        bar.push('█');
+    }
+    for _ in 0..empty {
+        bar.push('░');
+    }
+    bar
+}
+
+fn render_scrollback_mode(
+    frame: &mut Frame,
+    area: Rect,
+    cells_opt: Option<&Vec<Vec<Cell>>>,
+    cwd_opt: Option<&str>,
+    is_focused: bool,
+    scrollback_info: Option<(usize, usize)>,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
+            " SCROLLBACK ",
+            Style::default().fg(RatColor::LightCyan).add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::default().fg(RatColor::LightCyan));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    // Split inner into: CWD bar (1) | content (flexible) | status bar (1)
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    let cwd_area = chunks[0];
+    let content_area = chunks[1];
+    let status_area = chunks[2];
+
+    // CWD bar
+    let cwd_text = cwd_opt.unwrap_or("");
+    let cwd_style = if is_focused {
+        Style::default().bg(RatColor::DarkGray).fg(RatColor::White)
+    } else {
+        Style::default().fg(RatColor::DarkGray)
+    };
+    let cwd_line = Line::from(Span::styled(format!(" {} ", cwd_text), cwd_style));
+    frame.render_widget(Paragraph::new(vec![cwd_line]), cwd_area);
+
+    // Terminal content
+    if let Some(cells) = cells_opt {
+        let lines = cells_to_lines(cells, content_area.height as usize, content_area.width as usize);
+        frame.render_widget(Paragraph::new(lines), content_area);
+    }
+
+    // Status bar
+    let (offset, max) = scrollback_info.unwrap_or((0, 0));
+    let offset_text = format!(" {}/{} ", offset, max);
+    let hint_text = " ↑↓:line PgUp/Dn:page g/G:top/bottom q:exit ";
+    let offset_len = offset_text.len();
+    let hint_len = hint_text.len();
+    let bar_width = (status_area.width as usize).saturating_sub(offset_len + hint_len);
+
+    let status_style = Style::default().bg(RatColor::LightCyan).fg(RatColor::Black);
+    let mut spans = vec![Span::styled(&offset_text, status_style)];
+    if bar_width > 0 {
+        let bar = build_progress_bar(bar_width, offset, max);
+        spans.push(Span::styled(bar, status_style));
+    }
+    spans.push(Span::styled(hint_text, status_style));
+
+    // Pad remaining width with background color
+    let total_char_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let remaining = (status_area.width as usize).saturating_sub(total_char_len);
+    if remaining > 0 {
+        spans.push(Span::styled(" ".repeat(remaining), status_style));
+    }
+
+    frame.render_widget(Paragraph::new(vec![Line::from(spans)]), status_area);
+}
+
+fn render_normal_mode(
     frame: &mut Frame,
     area: Rect,
     cells_opt: Option<&Vec<Vec<Cell>>>,
@@ -60,73 +173,11 @@ pub fn render(
             frame.render_widget(Paragraph::new(vec![line]), centered_area);
         }
         Some(cells) => {
-            // Convert cells to ratatui Lines
-            let visible_rows = content_area.height as usize;
-            let visible_cols = content_area.width as usize;
-
-            let lines: Vec<Line> = cells
-                .iter()
-                .take(visible_rows)
-                .map(|row| {
-                    let spans: Vec<Span> = row
-                        .iter()
-                        .filter(|cell| cell.width != 0)
-                        .scan(0u16, |visual_col, cell| {
-                            let w = if cell.width == 2 { 2 } else { 1 };
-                            *visual_col += w;
-                            if *visual_col <= visible_cols as u16 {
-                                Some(cell)
-                            } else {
-                                None
-                            }
-                        })
-                        .map(|cell| {
-                            let (fg, bg) = if cell.reverse {
-                                let rfg = to_ratatui_color(cell.bg);
-                                let rbg = to_ratatui_color(cell.fg);
-                                // When both fg/bg are Default (Reset), reverse has no
-                                // visible effect. Substitute explicit White/Black so the
-                                // software cursor drawn by apps like Claude Code is visible.
-                                if rfg == RatColor::Reset && rbg == RatColor::Reset {
-                                    (RatColor::Black, RatColor::White)
-                                } else {
-                                    (rfg, rbg)
-                                }
-                            } else {
-                                (to_ratatui_color(cell.fg), to_ratatui_color(cell.bg))
-                            };
-                            let (fg, bg) = if cell.hidden {
-                                (bg, bg)
-                            } else {
-                                (fg, bg)
-                            };
-                            let mut style = Style::default().fg(fg).bg(bg);
-                            if cell.bold {
-                                style = style.add_modifier(Modifier::BOLD);
-                            }
-                            if cell.underline {
-                                style = style.add_modifier(Modifier::UNDERLINED);
-                            }
-                            if cell.italic {
-                                style = style.add_modifier(Modifier::ITALIC);
-                            }
-                            if cell.dim {
-                                style = style.add_modifier(Modifier::DIM);
-                            }
-                            if cell.strikethrough {
-                                style = style.add_modifier(Modifier::CROSSED_OUT);
-                            }
-                            Span::styled(cell.ch.to_string(), style)
-                        })
-                        .collect();
-                    Line::from(spans)
-                })
-                .collect();
-
+            let lines = cells_to_lines(cells, content_area.height as usize, content_area.width as usize);
             let paragraph = Paragraph::new(lines);
             frame.render_widget(paragraph, content_area);
 
-            // Scrollback indicator
+            // Scrollback indicator (old style, only in normal mode)
             if let Some((offset, max)) = scrollback_info
                 && offset > 0
             {
@@ -145,9 +196,7 @@ pub fn render(
                 }
             }
 
-            // Cursor rendering: show reverse-video block + hardware cursor when visible.
-            // When cursor_visible is false (DECTCEM off), the child process draws its own
-            // cursor via styled text, and the reported cursor position may be meaningless.
+            // Cursor rendering
             if cursor_visible
                 && let Some(cursor) = cursor_opt
             {
@@ -166,7 +215,6 @@ pub fn render(
                 if cursor_x < content_area.x + content_area.width
                     && cursor_y < content_area.y + content_area.height
                 {
-                    // Render cursor cell with reverse video for visibility
                     let cursor_ch = cells
                         .get(cursor.row as usize)
                         .and_then(|row| row.get(cursor.col as usize))
@@ -198,6 +246,65 @@ pub fn render(
             }
         }
     }
+}
+
+/// Convert cell grid to ratatui Lines, applying visual width clipping and styling.
+fn cells_to_lines<'a>(cells: &[Vec<Cell>], visible_rows: usize, visible_cols: usize) -> Vec<Line<'a>> {
+    cells
+        .iter()
+        .take(visible_rows)
+        .map(|row| {
+            let spans: Vec<Span> = row
+                .iter()
+                .filter(|cell| cell.width != 0)
+                .scan(0u16, |visual_col, cell| {
+                    let w = if cell.width == 2 { 2 } else { 1 };
+                    *visual_col += w;
+                    if *visual_col <= visible_cols as u16 {
+                        Some(cell)
+                    } else {
+                        None
+                    }
+                })
+                .map(|cell| {
+                    let (fg, bg) = if cell.reverse {
+                        let rfg = to_ratatui_color(cell.bg);
+                        let rbg = to_ratatui_color(cell.fg);
+                        if rfg == RatColor::Reset && rbg == RatColor::Reset {
+                            (RatColor::Black, RatColor::White)
+                        } else {
+                            (rfg, rbg)
+                        }
+                    } else {
+                        (to_ratatui_color(cell.fg), to_ratatui_color(cell.bg))
+                    };
+                    let (fg, bg) = if cell.hidden {
+                        (bg, bg)
+                    } else {
+                        (fg, bg)
+                    };
+                    let mut style = Style::default().fg(fg).bg(bg);
+                    if cell.bold {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                    if cell.underline {
+                        style = style.add_modifier(Modifier::UNDERLINED);
+                    }
+                    if cell.italic {
+                        style = style.add_modifier(Modifier::ITALIC);
+                    }
+                    if cell.dim {
+                        style = style.add_modifier(Modifier::DIM);
+                    }
+                    if cell.strikethrough {
+                        style = style.add_modifier(Modifier::CROSSED_OUT);
+                    }
+                    Span::styled(cell.ch.to_string(), style)
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -238,7 +345,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 60, 20);
-                render(frame, area, None, None, true, None, true, None);
+                render(frame, area, None, None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -265,7 +372,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 60, 20);
-                render(frame, area, None, None, true, Some("/home/user/project"), true, None);
+                render(frame, area, None, None, true, Some("/home/user/project"), true, None, false);
             })
             .unwrap();
 
@@ -296,7 +403,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -319,7 +426,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -343,7 +450,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -372,7 +479,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 5, 4);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -392,7 +499,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, None, None, true, None, true, None);
+                render(frame, area, None, None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -409,7 +516,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, None, None, true, Some("/tmp"), true, None);
+                render(frame, area, None, None, true, Some("/tmp"), true, None, false);
             })
             .unwrap();
 
@@ -426,7 +533,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, None, None, true, Some("/tmp"), false, None);
+                render(frame, area, None, None, true, Some("/tmp"), false, None, false);
             })
             .unwrap();
 
@@ -450,7 +557,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -472,7 +579,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -494,7 +601,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -518,7 +625,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -546,7 +653,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -571,7 +678,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -599,7 +706,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -625,7 +732,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, Some(&cells), Some(cursor), true, None, true, None);
+                render(frame, area, Some(&cells), Some(cursor), true, None, true, None, false);
             })
             .unwrap();
 
@@ -658,7 +765,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, Some(&cells), Some(cursor), true, None, true, None);
+                render(frame, area, Some(&cells), Some(cursor), true, None, true, None, false);
             })
             .unwrap();
 
@@ -688,7 +795,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 5, 4);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -722,7 +829,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
-                render(frame, area, Some(&cells), Some(cursor), true, None, true, None);
+                render(frame, area, Some(&cells), Some(cursor), true, None, true, None, false);
             })
             .unwrap();
 
@@ -751,7 +858,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 3, 4);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -780,7 +887,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -807,7 +914,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 10, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -831,7 +938,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 30, 5);
-                render(frame, area, Some(&cells), None, true, None, true, Some((42, 1000)));
+                render(frame, area, Some(&cells), None, true, None, true, Some((42, 1000)), false);
             })
             .unwrap();
 
@@ -859,7 +966,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 30, 5);
-                render(frame, area, Some(&cells), None, true, None, true, Some((0, 1000)));
+                render(frame, area, Some(&cells), None, true, None, true, Some((0, 1000)), false);
             })
             .unwrap();
 
@@ -879,7 +986,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 30, 5);
-                render(frame, area, Some(&cells), None, true, None, true, None);
+                render(frame, area, Some(&cells), None, true, None, true, None, false);
             })
             .unwrap();
 
@@ -899,7 +1006,7 @@ mod tests {
             .draw(|frame| {
                 let area = Rect::new(0, 0, 20, 5);
                 // "[5/50]" = 6 chars, starts at col 20-6 = 14
-                render(frame, area, Some(&cells), None, true, None, true, Some((5, 50)));
+                render(frame, area, Some(&cells), None, true, None, true, Some((5, 50)), false);
             })
             .unwrap();
 
@@ -921,7 +1028,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 3, 4);
-                render(frame, area, Some(&cells), None, true, None, true, Some((1, 10)));
+                render(frame, area, Some(&cells), None, true, None, true, Some((1, 10)), false);
             })
             .unwrap();
 
@@ -929,5 +1036,259 @@ mod tests {
         // No yellow background should appear since indicator doesn't fit
         let has_yellow = (0..3).any(|x| buf[(x, 1)].bg == RatColor::Yellow);
         assert!(!has_yellow, "Indicator should not appear when it doesn't fit");
+    }
+
+    // === Scrollback mode UI tests ===
+
+    #[test]
+    fn render_scrollback_mode_shows_border() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 60, 20);
+                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Top-left corner should be a rounded border character with LightCyan color
+        assert_eq!(buf[(0, 0)].fg, RatColor::LightCyan);
+        // Border chars: ╭ (top-left rounded)
+        let corner = buf[(0, 0)].symbol();
+        assert_eq!(corner, "╭", "Expected rounded border corner");
+    }
+
+    #[test]
+    fn render_scrollback_mode_shows_scrollback_title() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 60, 20);
+                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let top_row: String = (0..60)
+            .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            top_row.contains("SCROLLBACK"),
+            "Expected 'SCROLLBACK' in title, got: {}",
+            top_row
+        );
+    }
+
+    #[test]
+    fn render_scrollback_mode_title_is_lightcyan_bold() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 60, 20);
+                let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
+                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Find 'S' of SCROLLBACK in top row
+        let s_pos = (0..60).find(|&x| buf[(x, 0)].symbol() == "S");
+        assert!(s_pos.is_some(), "Expected 'S' from SCROLLBACK in top row");
+        let x = s_pos.unwrap();
+        assert_eq!(buf[(x, 0)].fg, RatColor::LightCyan);
+        assert!(buf[(x, 0)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn render_scrollback_mode_shows_status_bar() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 80, 20);
+                render(frame, area, Some(&cells), None, false, None, true, Some((50, 200)), true);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Status bar is at the bottom row inside the border (row 18 = area.y + area.height - 1 - 1)
+        // Inner area: y=1..18, so status bar at y=18
+        let status_row: String = (1..79)
+            .map(|x| buf[(x, 18)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            status_row.contains("50/200"),
+            "Expected '50/200' in status bar, got: {}",
+            status_row
+        );
+        assert!(
+            status_row.contains("q:exit"),
+            "Expected 'q:exit' hint in status bar, got: {}",
+            status_row
+        );
+    }
+
+    #[test]
+    fn render_scrollback_mode_status_bar_has_lightcyan_bg() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 60, 20);
+                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Status bar: inner y = 18 (area 20 - border 1 - border 1 = 18 inner rows, last inner row at y=18)
+        // Inside border, first content col = 1
+        assert_eq!(buf[(1, 18)].bg, RatColor::LightCyan);
+        assert_eq!(buf[(1, 18)].fg, RatColor::Black);
+    }
+
+    #[test]
+    fn render_scrollback_mode_offset_zero_still_shows_ui() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 60, 20);
+                render(frame, area, Some(&cells), None, false, None, true, Some((0, 100)), true);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Should still show SCROLLBACK title and status bar even at offset 0
+        let top_row: String = (0..60)
+            .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(top_row.contains("SCROLLBACK"));
+
+        // Status bar should show 0/100
+        let status_row: String = (1..59)
+            .map(|x| buf[(x, 18)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(status_row.contains("0/100"), "Expected '0/100' in status bar, got: {}", status_row);
+    }
+
+    #[test]
+    fn render_scrollback_mode_small_terminal_falls_back() {
+        // area.width < 4 || area.height < 5 => fallback to normal mode (no border)
+        let backend = TestBackend::new(3, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 3, 4);
+                render(frame, area, Some(&cells), None, false, None, true, Some((5, 50)), true);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // In fallback mode, no LightCyan border
+        assert_ne!(buf[(0, 0)].fg, RatColor::LightCyan, "Small terminal should fallback to normal mode");
+    }
+
+    #[test]
+    fn render_scrollback_mode_no_old_indicator() {
+        // In scrollback mode, the old yellow [offset/max] indicator should not appear
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 60, 20);
+                render(frame, area, Some(&cells), None, false, None, true, Some((10, 100)), true);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // No cell should have Yellow background (old indicator style)
+        let has_yellow_bg = (0..60).any(|x| {
+            (0..20).any(|y| buf[(x, y)].bg == RatColor::Yellow)
+        });
+        assert!(!has_yellow_bg, "Scrollback mode should not show old yellow indicator");
+    }
+
+    #[test]
+    fn render_scrollback_mode_progress_bar_present() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let cells = vec![vec![Cell { ch: 'A', ..Cell::default() }]];
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 80, 20);
+                render(frame, area, Some(&cells), None, false, None, true, Some((50, 100)), true);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Status bar at y=18 should contain progress bar characters
+        let status_row: String = (1..79)
+            .map(|x| buf[(x, 18)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        let has_filled = status_row.contains('█');
+        let has_empty = status_row.contains('░');
+        assert!(has_filled || has_empty, "Expected progress bar chars in status bar, got: {}", status_row);
+    }
+
+    // === build_progress_bar unit tests ===
+
+    #[test]
+    fn progress_bar_empty_when_width_zero() {
+        assert_eq!(build_progress_bar(0, 50, 100), "");
+    }
+
+    #[test]
+    fn progress_bar_empty_when_max_zero() {
+        assert_eq!(build_progress_bar(10, 0, 0), "");
+    }
+
+    #[test]
+    fn progress_bar_half_filled() {
+        let bar = build_progress_bar(10, 50, 100);
+        let filled = bar.chars().filter(|&c| c == '█').count();
+        let empty = bar.chars().filter(|&c| c == '░').count();
+        assert_eq!(filled, 5);
+        assert_eq!(empty, 5);
+    }
+
+    #[test]
+    fn progress_bar_fully_filled() {
+        let bar = build_progress_bar(10, 100, 100);
+        let filled = bar.chars().filter(|&c| c == '█').count();
+        assert_eq!(filled, 10);
+    }
+
+    #[test]
+    fn progress_bar_fully_empty() {
+        let bar = build_progress_bar(10, 0, 100);
+        let empty = bar.chars().filter(|&c| c == '░').count();
+        assert_eq!(empty, 10);
     }
 }

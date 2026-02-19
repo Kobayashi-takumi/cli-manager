@@ -225,6 +225,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                 cwd_opt.as_deref(),
                 *focus == FocusPane::Terminal,
                 scrollback_info,
+                main_in_scrollback,
             );
 
             // Mini terminal view (if visible)
@@ -256,6 +257,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                         mini_cursor_visible && *focus == FocusPane::MiniTerminal,
                         *focus == FocusPane::MiniTerminal,
                         mini_scrollback_info,
+                        mini_in_scrollback,
                     );
                 } else {
                     mini_terminal_view::render(
@@ -266,6 +268,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                         false,
                         *focus == FocusPane::MiniTerminal,
                         None,
+                        false,
                     );
                 }
             }
