@@ -572,7 +572,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                     input_handler.set_mode(InputMode::DialogInput);
                 } else {
                     // Exited terminal: close immediately without confirmation
-                    controller.dispatch(AppAction::CloseTerminal, size)?;
+                    let _ = controller.dispatch(AppAction::CloseTerminal, size);
                 }
             }
         }
@@ -843,7 +843,7 @@ fn handle_dialog_key<P: PtyPort, S: ScreenPort>(
         },
         DialogState::ConfirmClose { .. } => match key.code {
             KeyCode::Char('y') => {
-                controller.dispatch(AppAction::CloseTerminal, size)?;
+                let _ = controller.dispatch(AppAction::CloseTerminal, size);
                 *dialog = DialogState::None;
                 input_handler.set_mode(InputMode::Normal);
             }
