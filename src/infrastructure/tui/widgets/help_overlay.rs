@@ -101,6 +101,10 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
             ("/", "Search"),
             ("n", "Next match"),
             ("N", "Prev match"),
+            ("y", "Yank line"),
+            ("Y", "Yank visible"),
+            ("v", "Visual select"),
+            ("V", "Visual line"),
         ],
     );
     frame.render_widget(Paragraph::new(scroll_lines), columns[2]);
@@ -134,7 +138,14 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" This help"),
+        Span::raw(" This help    "),
+        Span::styled(
+            "]",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" Paste yank"),
     ]);
     let general = Paragraph::new(vec![general_header, general_content]);
     frame.render_widget(general, sections[3]);
@@ -412,6 +423,44 @@ mod tests {
         assert!(
             content.contains("Prev match"),
             "Expected 'Prev match' keybinding in SCROLLBACK category"
+        );
+    }
+
+    #[test]
+    fn help_overlay_renders_yank_keybindings() {
+        let buf = render_help(80, 28);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("Yank line"),
+            "Expected 'Yank line' keybinding in SCROLLBACK category"
+        );
+        assert!(
+            content.contains("Yank visible"),
+            "Expected 'Yank visible' keybinding in SCROLLBACK category"
+        );
+    }
+
+    #[test]
+    fn help_overlay_renders_visual_keybindings() {
+        let buf = render_help(80, 28);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("Visual select"),
+            "Expected 'Visual select' keybinding in SCROLLBACK category"
+        );
+        assert!(
+            content.contains("Visual line"),
+            "Expected 'Visual line' keybinding in SCROLLBACK category"
+        );
+    }
+
+    #[test]
+    fn help_overlay_renders_paste_yank_keybinding() {
+        let buf = render_help(80, 28);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("Paste yank"),
+            "Expected 'Paste yank' keybinding in GENERAL section"
         );
     }
 }

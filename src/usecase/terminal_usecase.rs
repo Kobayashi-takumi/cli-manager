@@ -458,6 +458,10 @@ mod tests {
         fn search_scrollback(&mut self, _id: TerminalId, _query: &str) -> Result<Vec<SearchMatch>, AppError> {
             Ok(vec![])
         }
+
+        fn get_row_cells(&mut self, _id: TerminalId, _abs_row: usize) -> Result<Vec<Cell>, AppError> {
+            Ok(vec![])
+        }
     }
 
     // =========================================================================

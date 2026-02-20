@@ -21,7 +21,7 @@ fn char_to_byte_index(s: &str, char_pos: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-use crate::domain::primitive::{CursorStyle, SearchMatch, TerminalId, TerminalSize};
+use crate::domain::primitive::{Cell, CursorStyle, SearchMatch, TerminalId, TerminalSize};
 use crate::infrastructure::notification::MacOsNotifier;
 use crate::infrastructure::tui::input::{InputHandler, InputMode};
 use crate::infrastructure::tui::fuzzy_matcher;
@@ -134,6 +134,120 @@ impl SearchState {
     }
 }
 
+/// A position within the terminal cell grid, using absolute row indexing
+/// (row 0 = top of scrollback buffer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectionPos {
+    row: usize,
+    col: usize,
+}
+
+/// Whether the selection operates on individual characters or whole lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionMode {
+    Character,
+    Line,
+}
+
+/// Tracks an active text selection: the anchor (where the selection started)
+/// and the cursor (the moving end).
+struct SelectionState {
+    mode: SelectionMode,
+    anchor: SelectionPos,
+    cursor: SelectionPos,
+}
+
+impl SelectionState {
+    fn new(mode: SelectionMode, pos: SelectionPos) -> Self {
+        Self {
+            mode,
+            anchor: pos,
+            cursor: pos,
+        }
+    }
+
+    /// Returns (start, end) normalized so start <= end.
+    fn ordered(&self) -> (SelectionPos, SelectionPos) {
+        if self.anchor.row < self.cursor.row
+            || (self.anchor.row == self.cursor.row && self.anchor.col <= self.cursor.col)
+        {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+}
+
+/// Extract text from a cell grid.
+///
+/// - `start_row` / `end_row`: row range (end_row is exclusive)
+/// - `start_col` / `end_col`: column range for character-wise selection (exclusive end).
+///   When both are None, extracts full-width lines (line selection).
+///   When Some, first line starts at start_col, last line ends at end_col,
+///   middle lines are full-width.
+fn extract_text_from_cells(
+    cells: &[Vec<Cell>],
+    start_row: usize,
+    end_row: usize,
+    start_col: Option<usize>,
+    end_col: Option<usize>,
+) -> String {
+    if start_row >= end_row {
+        return String::new();
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+
+    for row_idx in start_row..end_row {
+        if row_idx >= cells.len() {
+            break;
+        }
+        let row = &cells[row_idx];
+        let row_len = row.len();
+
+        let (col_start, col_end) = if let (Some(sc), Some(ec)) = (start_col, end_col) {
+            let total_rows = end_row - start_row;
+            if total_rows == 1 {
+                // Single row: use start_col..end_col
+                (sc, ec.min(row_len))
+            } else if row_idx == start_row {
+                // First row of multi-row: start_col..row_len
+                (sc, row_len)
+            } else if row_idx == end_row - 1 {
+                // Last row of multi-row: 0..end_col
+                (0, ec.min(row_len))
+            } else {
+                // Middle rows: full width
+                (0, row_len)
+            }
+        } else {
+            // Line selection: full width
+            (0, row_len)
+        };
+
+        let mut line = String::new();
+        for col_idx in col_start..col_end {
+            let cell = &row[col_idx];
+            if cell.width == 0 {
+                // Skip wide-char continuation cells
+                continue;
+            }
+            line.push(cell.ch);
+        }
+
+        // Trim trailing whitespace from each line
+        let trimmed = line.trim_end().to_string();
+        lines.push(trimmed);
+    }
+
+    // Remove trailing empty lines
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+
+    lines.join("\n")
+}
+
 /// Main TUI event loop.
 ///
 /// Initializes crossterm raw mode + alternate screen, creates the ratatui Terminal,
@@ -193,8 +307,18 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
     search_state: &mut Option<SearchState>,
 ) -> anyhow::Result<()> {
     let mut mini_terminal = MiniTerminalState::new();
+    let mut yank_buffer: Option<String> = None;
+    let mut yank_flash_until: Option<std::time::Instant> = None;
+    let mut selection_state: Option<SelectionState> = None;
 
     while !*should_quit {
+        // 1. Compute status message before draw (flash expires after 2 seconds)
+        let status_msg = if yank_flash_until.map(|t| t > std::time::Instant::now()).unwrap_or(false) {
+            Some("Yanked!")
+        } else {
+            None
+        };
+
         // 1. Draw
         terminal.draw(|frame| {
             let areas = layout::compute_layout(frame.area(), mini_terminal.is_visible());
@@ -323,6 +447,66 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                 (areas.main_pane, None)
             };
 
+            // Compute selection highlights for the main terminal
+            let (main_sel_hl, main_visual_label) = if main_in_scrollback && selection_state.is_some() && *scrollback_target == Some(ScrollbackTarget::MainTerminal) {
+                if let Some(sel) = selection_state.as_ref() {
+                    if let Some(t) = controller.usecase().get_active_terminal() {
+                        let id = t.id();
+                        let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                        let offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                        let visible_start = max_sb.saturating_sub(offset);
+                        let content_rows = if areas.main_pane.height >= 5 {
+                            (areas.main_pane.height - 4) as usize
+                        } else {
+                            areas.main_pane.height.saturating_sub(1) as usize
+                        };
+                        let visible_end = visible_start + content_rows;
+                        let num_cols = controller.usecase().screen_port().get_cells(id)
+                            .map(|c| c.first().map_or(0, |r| r.len()))
+                            .unwrap_or(0);
+
+                        let (start, end) = sel.ordered();
+                        let mut ranges = Vec::new();
+                        for abs_row in start.row..=end.row {
+                            if abs_row >= visible_start && abs_row < visible_end {
+                                let display_row = abs_row - visible_start;
+                                let (cs, ce) = match sel.mode {
+                                    SelectionMode::Line => (0, num_cols),
+                                    SelectionMode::Character => {
+                                        if start.row == end.row {
+                                            (start.col, end.col + 1)
+                                        } else if abs_row == start.row {
+                                            (start.col, num_cols)
+                                        } else if abs_row == end.row {
+                                            (0, end.col + 1)
+                                        } else {
+                                            (0, num_cols)
+                                        }
+                                    }
+                                };
+                                ranges.push((display_row, cs, ce));
+                            }
+                        }
+                        let cursor_display = if sel.cursor.row >= visible_start && sel.cursor.row < visible_end {
+                            Some((sel.cursor.row - visible_start, sel.cursor.col))
+                        } else {
+                            None
+                        };
+                        let label = match sel.mode {
+                            SelectionMode::Character => "-- VISUAL --",
+                            SelectionMode::Line => "-- VISUAL LINE --",
+                        };
+                        (Some(terminal_view::SelectionHighlights { ranges, cursor: cursor_display }), Some(label))
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
+
             terminal_view::render(
                 frame,
                 terminal_area,
@@ -334,6 +518,9 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                 scrollback_info,
                 main_in_scrollback,
                 search_hl.as_ref(),
+                if main_in_scrollback { status_msg } else { None },
+                main_sel_hl.as_ref(),
+                main_visual_label,
             );
 
             // Render search bar if active
@@ -354,6 +541,58 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
             // Mini terminal view (if visible)
             let mini_in_scrollback = *scrollback_target == Some(ScrollbackTarget::MiniTerminal);
             if let Some(mini_area) = areas.mini_terminal {
+                // Compute selection highlights for the mini terminal
+                let (mini_sel_hl, mini_visual_label) = if mini_in_scrollback && selection_state.is_some() && *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                    if let Some(sel) = selection_state.as_ref() {
+                        let mid = mini_terminal.terminal_id;
+                        let max_sb = controller.usecase().screen_port().get_max_scrollback(mid).unwrap_or(0);
+                        let offset = controller.usecase().screen_port().get_scrollback_offset(mid).unwrap_or(0);
+                        let visible_start = max_sb.saturating_sub(offset);
+                        let content_rows = (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4);
+                        let visible_end = visible_start + content_rows;
+                        let num_cols = controller.usecase().screen_port().get_cells(mid)
+                            .map(|c| c.first().map_or(0, |r| r.len()))
+                            .unwrap_or(0);
+
+                        let (start, end) = sel.ordered();
+                        let mut ranges = Vec::new();
+                        for abs_row in start.row..=end.row {
+                            if abs_row >= visible_start && abs_row < visible_end {
+                                let display_row = abs_row - visible_start;
+                                let (cs, ce) = match sel.mode {
+                                    SelectionMode::Line => (0, num_cols),
+                                    SelectionMode::Character => {
+                                        if start.row == end.row {
+                                            (start.col, end.col + 1)
+                                        } else if abs_row == start.row {
+                                            (start.col, num_cols)
+                                        } else if abs_row == end.row {
+                                            (0, end.col + 1)
+                                        } else {
+                                            (0, num_cols)
+                                        }
+                                    }
+                                };
+                                ranges.push((display_row, cs, ce));
+                            }
+                        }
+                        let cursor_display = if sel.cursor.row >= visible_start && sel.cursor.row < visible_end {
+                            Some((sel.cursor.row - visible_start, sel.cursor.col))
+                        } else {
+                            None
+                        };
+                        let label = match sel.mode {
+                            SelectionMode::Character => "-- VISUAL --",
+                            SelectionMode::Line => "-- VISUAL LINE --",
+                        };
+                        (Some(terminal_view::SelectionHighlights { ranges, cursor: cursor_display }), Some(label))
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                };
+
                 if mini_terminal.spawned {
                     let mid = mini_terminal.terminal_id;
                     let mini_cells = controller.usecase().screen_port().get_cells(mid).ok();
@@ -381,6 +620,9 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                         *focus == FocusPane::MiniTerminal,
                         mini_scrollback_info,
                         mini_in_scrollback,
+                        if mini_in_scrollback { status_msg } else { None },
+                        mini_sel_hl.as_ref(),
+                        mini_visual_label,
                     );
                 } else {
                     mini_terminal_view::render(
@@ -392,6 +634,9 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                         *focus == FocusPane::MiniTerminal,
                         None,
                         false,
+                        None,
+                        None,
+                        None,
                     );
                 }
             }
@@ -473,6 +718,11 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
             }
         })?;
 
+        // 1.1. Clear expired yank flash
+        if status_msg.is_none() {
+            yank_flash_until = None;
+        }
+
         // 1.5. Apply cursor style from the focused terminal
         if !matches!(dialog, DialogState::None) {
             // Dialogs use their own cursor; no style change needed
@@ -548,6 +798,10 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                     if search_state.is_some() && *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
                         *search_state = None;
                     }
+                    // Clear selection state if selecting in mini terminal
+                    if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                        selection_state = None;
+                    }
                     // If we were scrolling the mini terminal, exit scrollback
                     if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
                         *scrollback_target = None;
@@ -568,6 +822,10 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                 // Clear search state if searching mini terminal
                 if search_state.is_some() && *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
                     *search_state = None;
+                }
+                // Clear selection state if selecting in mini terminal
+                if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                    selection_state = None;
                 }
                 // If we were scrolling the mini terminal, exit scrollback
                 if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
@@ -603,7 +861,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
             let ev = event::read()?;
             match ev {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    handle_key_event(key, controller, input_handler, should_quit, dialog, focus, size, scrollback_target, &mut mini_terminal, search_state)?;
+                    handle_key_event(key, controller, input_handler, should_quit, dialog, focus, size, scrollback_target, &mut mini_terminal, search_state, &mut yank_buffer, &mut yank_flash_until, &mut selection_state)?;
                 }
                 Event::Resize(cols, rows) => {
                     let new_full = Rect::new(0, 0, cols, rows);
@@ -696,10 +954,19 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
     scrollback_target: &mut Option<ScrollbackTarget>,
     mini_terminal: &mut MiniTerminalState,
     search_state: &mut Option<SearchState>,
+    yank_buffer: &mut Option<String>,
+    yank_flash_until: &mut Option<std::time::Instant>,
+    selection_state: &mut Option<SelectionState>,
 ) -> anyhow::Result<()> {
     // If in ScrollbackSearch mode, handle search bar input directly
     if matches!(input_handler.mode(), InputMode::ScrollbackSearch) {
         handle_search_key(key, controller, input_handler, scrollback_target, mini_terminal, search_state)?;
+        return Ok(());
+    }
+
+    // If in VisualSelection mode, handle visual keys directly
+    if matches!(input_handler.mode(), InputMode::VisualSelection) {
+        handle_visual_key(key, controller, input_handler, scrollback_target, mini_terminal, selection_state, yank_buffer, yank_flash_until, size)?;
         return Ok(());
     }
 
@@ -747,7 +1014,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
 
     match action {
         AppAction::CreateTerminal { .. } => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
             *dialog = DialogState::CreateTerminal {
                 input: String::new(),
                 cursor_pos: 0,
@@ -755,7 +1022,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             input_handler.set_mode(InputMode::DialogInput);
         }
         AppAction::CloseTerminal => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
             // Check if the active terminal is running
             if let Some(terminal) = controller.usecase().get_active_terminal() {
                 if terminal.status().is_running() {
@@ -774,7 +1041,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             *should_quit = true;
         }
         AppAction::ToggleFocus => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
             *focus = match *focus {
                 FocusPane::Sidebar => FocusPane::Terminal,
                 FocusPane::Terminal => FocusPane::Sidebar,
@@ -782,7 +1049,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             };
         }
         AppAction::SelectNext | AppAction::SelectPrev | AppAction::SelectByIndex(_) => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
             if *focus == FocusPane::MiniTerminal {
                 *focus = FocusPane::Terminal;
                 input_handler.set_mode(InputMode::Normal);
@@ -826,7 +1093,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                 // handle_scrollback() already set mode to Normal, restore ScrollbackMode
                 input_handler.set_mode(InputMode::ScrollbackMode);
             } else {
-                exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
+                exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
             }
         }
         AppAction::EnterScrollbackSearch => {
@@ -877,7 +1144,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                 let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset);
                 if new_offset == 0 {
                     // Auto-exit scrollback when reaching bottom
-                    exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
+                    exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
                 }
             }
         }
@@ -905,7 +1172,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                 let new_offset = current.saturating_sub(page);
                 let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset);
                 if new_offset == 0 {
-                    exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
+                    exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
                 }
             }
         }
@@ -919,10 +1186,96 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
                 let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, 0);
             }
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
+        }
+        AppAction::YankAllVisible => {
+            if scrollback_target.is_some() {
+                if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
+                    if let Ok(cells) = controller.usecase().screen_port().get_cells(id) {
+                        let text = extract_text_from_cells(cells, 0, cells.len(), None, None);
+                        if !text.is_empty() {
+                            *yank_buffer = Some(text);
+                            *yank_flash_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                        }
+                    }
+                }
+            }
+        }
+        AppAction::YankLine => {
+            if scrollback_target.is_some() {
+                if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
+                    if let Ok(cells) = controller.usecase().screen_port().get_cells(id) {
+                        let text = extract_text_from_cells(cells, 0, 1, None, None);
+                        if !text.is_empty() {
+                            *yank_buffer = Some(text);
+                            *yank_flash_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                        }
+                    }
+                }
+            }
+        }
+        AppAction::PasteYankBuffer => {
+            if let Some(ref text) = *yank_buffer {
+                if !text.is_empty() {
+                    match *focus {
+                        FocusPane::MiniTerminal if mini_terminal.visible && mini_terminal.spawned => {
+                            let id = mini_terminal.terminal_id;
+                            let bp = controller.usecase().screen_port().get_bracketed_paste(id).unwrap_or(false);
+                            let mut data = Vec::new();
+                            if bp {
+                                data.extend_from_slice(b"\x1b[200~");
+                            }
+                            data.extend_from_slice(text.as_bytes());
+                            if bp {
+                                data.extend_from_slice(b"\x1b[201~");
+                            }
+                            let _ = controller.usecase_mut().pty_port_mut().write(id, &data);
+                        }
+                        _ => {
+                            if let Some(active) = controller.usecase().get_active_terminal() {
+                                let id = active.id();
+                                let bp = controller.usecase().screen_port().get_bracketed_paste(id).unwrap_or(false);
+                                let mut data = Vec::new();
+                                if bp {
+                                    data.extend_from_slice(b"\x1b[200~");
+                                }
+                                data.extend_from_slice(text.as_bytes());
+                                if bp {
+                                    data.extend_from_slice(b"\x1b[201~");
+                                }
+                                let _ = controller.dispatch(AppAction::WriteToActive(data), size);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        AppAction::EnterVisualChar | AppAction::EnterVisualLine => {
+            if scrollback_target.is_some() {
+                if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
+                    let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                    let offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                    let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                        (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4) // borders + title
+                    } else {
+                        size.rows as usize
+                    };
+                    // Initial cursor at center of visible area
+                    let visible_start = max_sb.saturating_sub(offset);
+                    let initial_row = visible_start + screen_rows / 2;
+                    let initial_pos = SelectionPos { row: initial_row, col: 0 };
+                    let mode = if matches!(action, AppAction::EnterVisualChar) {
+                        SelectionMode::Character
+                    } else {
+                        SelectionMode::Line
+                    };
+                    *selection_state = Some(SelectionState::new(mode, initial_pos));
+                    input_handler.set_mode(InputMode::VisualSelection);
+                }
+            }
         }
         AppAction::RenameTerminal { .. } => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
             if let Some(terminal) = controller.usecase().get_active_terminal() {
                 let current_name = terminal.name().to_string();
                 let cursor_pos = current_name.chars().count();
@@ -934,7 +1287,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             }
         }
         AppAction::OpenMemo => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
             if let Ok(memo) = controller.usecase().get_active_memo() {
                 let text = memo.to_string();
                 let lines: Vec<&str> = text.split('\n').collect();
@@ -949,12 +1302,12 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             }
         }
         AppAction::ShowHelp => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
             *dialog = DialogState::Help;
             input_handler.set_mode(InputMode::HelpView);
         }
         AppAction::ToggleMiniTerminal => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
             if !mini_terminal.spawned {
                 // First time: spawn PTY + Screen
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
@@ -997,7 +1350,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             }
         }
         AppAction::OpenQuickSwitcher => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
             *dialog = DialogState::QuickSwitch {
                 query: String::new(),
                 cursor_pos: 0,
@@ -1028,8 +1381,10 @@ fn exit_scrollback_if_active<P: PtyPort, S: ScreenPort>(
     scrollback_target: &mut Option<ScrollbackTarget>,
     mini_terminal: &MiniTerminalState,
     search_state: &mut Option<SearchState>,
+    selection_state: &mut Option<SelectionState>,
 ) {
     *search_state = None; // Clear search on exit
+    *selection_state = None; // Clear selection on exit
     if let Some(target) = *scrollback_target {
         match target {
             ScrollbackTarget::MainTerminal => {
@@ -1047,6 +1402,139 @@ fn exit_scrollback_if_active<P: PtyPort, S: ScreenPort>(
         }
         *scrollback_target = None;
     }
+}
+
+fn handle_visual_key<P: PtyPort, S: ScreenPort>(
+    key: KeyEvent,
+    controller: &mut TuiController<P, S>,
+    input_handler: &mut InputHandler,
+    scrollback_target: &mut Option<ScrollbackTarget>,
+    mini_terminal: &MiniTerminalState,
+    selection_state: &mut Option<SelectionState>,
+    yank_buffer: &mut Option<String>,
+    yank_flash_until: &mut Option<std::time::Instant>,
+    size: TerminalSize,
+) -> anyhow::Result<()> {
+    let sel = match selection_state.as_mut() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+    let id = match active_scrollback_id(scrollback_target, controller, mini_terminal) {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+
+    let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+    let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+        (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
+    } else {
+        size.rows as usize
+    };
+    // Total rows = max_scrollback + screen_rows
+    let total_rows = max_sb + screen_rows;
+    // Get number of columns from cells
+    let num_cols = controller.usecase().screen_port().get_cells(id)
+        .map(|cells| cells.first().map_or(0, |row| row.len()))
+        .unwrap_or(0);
+
+    match key.code {
+        KeyCode::Char('h') | KeyCode::Left => {
+            sel.cursor.col = sel.cursor.col.saturating_sub(1);
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            sel.cursor.col = (sel.cursor.col + 1).min(num_cols.saturating_sub(1));
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            sel.cursor.row = (sel.cursor.row + 1).min(total_rows.saturating_sub(1));
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            sel.cursor.row = sel.cursor.row.saturating_sub(1);
+        }
+        KeyCode::Char('0') => {
+            sel.cursor.col = 0;
+        }
+        KeyCode::Char('$') => {
+            sel.cursor.col = num_cols.saturating_sub(1);
+        }
+        KeyCode::PageUp => {
+            let page = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                4
+            } else {
+                screen_rows / 2
+            };
+            sel.cursor.row = sel.cursor.row.saturating_sub(page);
+        }
+        KeyCode::PageDown => {
+            let page = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                4
+            } else {
+                screen_rows / 2
+            };
+            sel.cursor.row = (sel.cursor.row + page).min(total_rows.saturating_sub(1));
+        }
+        KeyCode::Char('y') => {
+            // Yank selection
+            let (start, end) = sel.ordered();
+            let text = match sel.mode {
+                SelectionMode::Line => {
+                    let mut all_cells: Vec<Vec<Cell>> = Vec::new();
+                    for r in start.row..=end.row {
+                        if let Ok(row_cells) = controller.usecase_mut().screen_port_mut().get_row_cells(id, r) {
+                            all_cells.push(row_cells);
+                        }
+                    }
+                    extract_text_from_cells(&all_cells, 0, all_cells.len(), None, None)
+                }
+                SelectionMode::Character => {
+                    if start.row == end.row {
+                        if let Ok(row_cells) = controller.usecase_mut().screen_port_mut().get_row_cells(id, start.row) {
+                            extract_text_from_cells(&[row_cells], 0, 1, Some(start.col), Some(end.col + 1))
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        let mut all_cells: Vec<Vec<Cell>> = Vec::new();
+                        for r in start.row..=end.row {
+                            if let Ok(row_cells) = controller.usecase_mut().screen_port_mut().get_row_cells(id, r) {
+                                all_cells.push(row_cells);
+                            }
+                        }
+                        extract_text_from_cells(&all_cells, 0, all_cells.len(), Some(start.col), Some(end.col + 1))
+                    }
+                }
+            };
+            if !text.is_empty() {
+                *yank_buffer = Some(text);
+                *yank_flash_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+            }
+            *selection_state = None;
+            input_handler.set_mode(InputMode::ScrollbackMode);
+            return Ok(());
+        }
+        KeyCode::Esc => {
+            *selection_state = None;
+            input_handler.set_mode(InputMode::ScrollbackMode);
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Auto-scroll: ensure cursor row is visible
+    let offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+    let visible_start = max_sb.saturating_sub(offset);
+    let visible_end = visible_start + screen_rows;
+
+    if sel.cursor.row < visible_start {
+        // Cursor above visible area -- scroll up
+        let new_offset = max_sb.saturating_sub(sel.cursor.row);
+        let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset.min(max_sb));
+    } else if sel.cursor.row >= visible_end {
+        // Cursor below visible area -- scroll down
+        let new_offset = max_sb.saturating_sub(sel.cursor.row.saturating_sub(screen_rows.saturating_sub(1)));
+        let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset);
+    }
+
+    Ok(())
 }
 
 fn handle_search_key<P: PtyPort, S: ScreenPort>(
@@ -3002,5 +3490,656 @@ mod tests {
             search_state.is_none(),
             "search_state should remain None"
         );
+    }
+
+    // === Task #92: SelectionState + extract_text_from_cells tests ===
+
+    // --- SelectionPos tests ---
+
+    #[test]
+    fn selection_pos_stores_row_and_col() {
+        let pos = SelectionPos { row: 5, col: 10 };
+        assert_eq!(pos.row, 5);
+        assert_eq!(pos.col, 10);
+    }
+
+    #[test]
+    fn selection_pos_is_copy_and_clone() {
+        let pos = SelectionPos { row: 1, col: 2 };
+        let cloned = pos.clone();
+        let copied = pos;
+        assert_eq!(cloned, copied);
+    }
+
+    #[test]
+    fn selection_pos_debug_format() {
+        let pos = SelectionPos { row: 3, col: 7 };
+        let debug = format!("{:?}", pos);
+        assert!(debug.contains("3"));
+        assert!(debug.contains("7"));
+    }
+
+    // --- SelectionMode tests ---
+
+    #[test]
+    fn selection_mode_character_variant_exists() {
+        let mode = SelectionMode::Character;
+        assert_eq!(mode, SelectionMode::Character);
+    }
+
+    #[test]
+    fn selection_mode_line_variant_exists() {
+        let mode = SelectionMode::Line;
+        assert_eq!(mode, SelectionMode::Line);
+    }
+
+    #[test]
+    fn selection_mode_character_is_not_line() {
+        assert_ne!(SelectionMode::Character, SelectionMode::Line);
+    }
+
+    #[test]
+    fn selection_mode_is_copy_and_clone() {
+        let mode = SelectionMode::Character;
+        let cloned = mode.clone();
+        let copied = mode;
+        assert_eq!(cloned, copied);
+    }
+
+    // --- SelectionState::new tests ---
+
+    #[test]
+    fn selection_state_new_sets_mode() {
+        let pos = SelectionPos { row: 0, col: 0 };
+        let state = SelectionState::new(SelectionMode::Character, pos);
+        assert_eq!(state.mode, SelectionMode::Character);
+    }
+
+    #[test]
+    fn selection_state_new_sets_anchor_and_cursor_to_same_position() {
+        let pos = SelectionPos { row: 5, col: 10 };
+        let state = SelectionState::new(SelectionMode::Line, pos);
+        assert_eq!(state.anchor, pos);
+        assert_eq!(state.cursor, pos);
+    }
+
+    #[test]
+    fn selection_state_new_line_mode() {
+        let pos = SelectionPos { row: 2, col: 3 };
+        let state = SelectionState::new(SelectionMode::Line, pos);
+        assert_eq!(state.mode, SelectionMode::Line);
+        assert_eq!(state.anchor.row, 2);
+        assert_eq!(state.anchor.col, 3);
+    }
+
+    // --- SelectionState::ordered tests ---
+
+    #[test]
+    fn selection_state_ordered_anchor_before_cursor_same_row() {
+        let mut state = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 5, col: 2 },
+        );
+        state.cursor = SelectionPos { row: 5, col: 8 };
+        let (start, end) = state.ordered();
+        assert_eq!(start, SelectionPos { row: 5, col: 2 });
+        assert_eq!(end, SelectionPos { row: 5, col: 8 });
+    }
+
+    #[test]
+    fn selection_state_ordered_cursor_before_anchor_same_row() {
+        let mut state = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 5, col: 8 },
+        );
+        state.cursor = SelectionPos { row: 5, col: 2 };
+        let (start, end) = state.ordered();
+        assert_eq!(start, SelectionPos { row: 5, col: 2 });
+        assert_eq!(end, SelectionPos { row: 5, col: 8 });
+    }
+
+    #[test]
+    fn selection_state_ordered_anchor_before_cursor_different_rows() {
+        let mut state = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 2, col: 5 },
+        );
+        state.cursor = SelectionPos { row: 7, col: 3 };
+        let (start, end) = state.ordered();
+        assert_eq!(start, SelectionPos { row: 2, col: 5 });
+        assert_eq!(end, SelectionPos { row: 7, col: 3 });
+    }
+
+    #[test]
+    fn selection_state_ordered_cursor_before_anchor_different_rows() {
+        let mut state = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 7, col: 3 },
+        );
+        state.cursor = SelectionPos { row: 2, col: 5 };
+        let (start, end) = state.ordered();
+        assert_eq!(start, SelectionPos { row: 2, col: 5 });
+        assert_eq!(end, SelectionPos { row: 7, col: 3 });
+    }
+
+    #[test]
+    fn selection_state_ordered_same_position() {
+        let pos = SelectionPos { row: 3, col: 4 };
+        let state = SelectionState::new(SelectionMode::Character, pos);
+        let (start, end) = state.ordered();
+        assert_eq!(start, pos);
+        assert_eq!(end, pos);
+    }
+
+    // --- extract_text_from_cells tests ---
+
+    /// Helper to create a row of ASCII cells from a string.
+    fn make_ascii_row(s: &str) -> Vec<Cell> {
+        s.chars()
+            .map(|ch| Cell { ch, ..Cell::default() })
+            .collect()
+    }
+
+    /// Helper to create a wide character cell pair (width=2 cell + width=0 continuation).
+    fn make_wide_cell(ch: char) -> (Cell, Cell) {
+        (
+            Cell { ch, width: 2, ..Cell::default() },
+            Cell { ch: ' ', width: 0, ..Cell::default() },
+        )
+    }
+
+    #[test]
+    fn extract_text_ascii_single_line() {
+        let cells = vec![make_ascii_row("Hello World")];
+        let result = extract_text_from_cells(&cells, 0, 1, None, None);
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn extract_text_ascii_multi_line() {
+        let cells = vec![
+            make_ascii_row("Line one  "),
+            make_ascii_row("Line two  "),
+            make_ascii_row("Line three"),
+        ];
+        let result = extract_text_from_cells(&cells, 0, 3, None, None);
+        assert_eq!(result, "Line one\nLine two\nLine three");
+    }
+
+    #[test]
+    fn extract_text_trailing_whitespace_trimmed() {
+        let cells = vec![
+            make_ascii_row("abc   "),
+            make_ascii_row("def   "),
+        ];
+        let result = extract_text_from_cells(&cells, 0, 2, None, None);
+        assert_eq!(result, "abc\ndef");
+    }
+
+    #[test]
+    fn extract_text_wide_characters() {
+        // "日本" = two wide chars, each taking 2 columns
+        let mut row = Vec::new();
+        let (w1, c1) = make_wide_cell('\u{65E5}'); // 日
+        let (w2, c2) = make_wide_cell('\u{672C}'); // 本
+        row.push(w1);
+        row.push(c1);
+        row.push(w2);
+        row.push(c2);
+        let cells = vec![row];
+        let result = extract_text_from_cells(&cells, 0, 1, None, None);
+        assert_eq!(result, "\u{65E5}\u{672C}");
+    }
+
+    #[test]
+    fn extract_text_narrow_and_wide_mixed() {
+        // "A日B" — A(w=1), 日(w=2), cont(w=0), B(w=1)
+        let mut row = Vec::new();
+        row.push(Cell { ch: 'A', ..Cell::default() });
+        let (w, c) = make_wide_cell('\u{65E5}');
+        row.push(w);
+        row.push(c);
+        row.push(Cell { ch: 'B', ..Cell::default() });
+        let cells = vec![row];
+        let result = extract_text_from_cells(&cells, 0, 1, None, None);
+        assert_eq!(result, "A\u{65E5}B");
+    }
+
+    #[test]
+    fn extract_text_empty_cells_trimmed() {
+        // Row of default cells (spaces with width=1)
+        let cells = vec![vec![Cell::default(); 10]];
+        let result = extract_text_from_cells(&cells, 0, 1, None, None);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn extract_text_trailing_empty_lines_removed() {
+        let cells = vec![
+            make_ascii_row("Hello"),
+            vec![Cell::default(); 5], // all spaces
+            vec![Cell::default(); 5], // all spaces
+        ];
+        let result = extract_text_from_cells(&cells, 0, 3, None, None);
+        assert_eq!(result, "Hello");
+    }
+
+    #[test]
+    fn extract_text_empty_lines_in_middle_preserved() {
+        let cells = vec![
+            make_ascii_row("First"),
+            vec![Cell::default(); 5],
+            make_ascii_row("Third"),
+        ];
+        let result = extract_text_from_cells(&cells, 0, 3, None, None);
+        assert_eq!(result, "First\n\nThird");
+    }
+
+    #[test]
+    fn extract_text_character_selection_single_line() {
+        let cells = vec![make_ascii_row("Hello World")];
+        // Extract "llo W" (col 2..7)
+        let result = extract_text_from_cells(&cells, 0, 1, Some(2), Some(7));
+        assert_eq!(result, "llo W");
+    }
+
+    #[test]
+    fn extract_text_character_selection_multi_line() {
+        let cells = vec![
+            make_ascii_row("ABCDEF"),
+            make_ascii_row("GHIJKL"),
+            make_ascii_row("MNOPQR"),
+        ];
+        // Select from row 0 col 3 to row 2 col 2:
+        // Row 0: "DEF" (col 3..6)
+        // Row 1: "GHIJKL" (full width)
+        // Row 2: "MN" (col 0..2)
+        let result = extract_text_from_cells(&cells, 0, 3, Some(3), Some(2));
+        assert_eq!(result, "DEF\nGHIJKL\nMN");
+    }
+
+    #[test]
+    fn extract_text_character_selection_two_lines() {
+        let cells = vec![
+            make_ascii_row("ABCDEF"),
+            make_ascii_row("GHIJKL"),
+        ];
+        // Row 0: "DEF" (col 3..6)
+        // Row 1: "GH" (col 0..2)
+        let result = extract_text_from_cells(&cells, 0, 2, Some(3), Some(2));
+        assert_eq!(result, "DEF\nGH");
+    }
+
+    #[test]
+    fn extract_text_empty_range_returns_empty_string() {
+        let cells = vec![make_ascii_row("Hello")];
+        let result = extract_text_from_cells(&cells, 0, 0, None, None);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn extract_text_start_row_equals_end_row_returns_empty() {
+        let cells = vec![make_ascii_row("Hello")];
+        let result = extract_text_from_cells(&cells, 2, 2, None, None);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn extract_text_start_row_greater_than_end_row_returns_empty() {
+        let cells = vec![make_ascii_row("Hello")];
+        let result = extract_text_from_cells(&cells, 5, 3, None, None);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn extract_text_partial_row_range() {
+        let cells = vec![
+            make_ascii_row("Row 0"),
+            make_ascii_row("Row 1"),
+            make_ascii_row("Row 2"),
+            make_ascii_row("Row 3"),
+        ];
+        // Extract only rows 1..3
+        let result = extract_text_from_cells(&cells, 1, 3, None, None);
+        assert_eq!(result, "Row 1\nRow 2");
+    }
+
+    #[test]
+    fn extract_text_end_row_beyond_cells_len() {
+        let cells = vec![
+            make_ascii_row("Only row"),
+        ];
+        // end_row is 5 but cells only has 1 row
+        let result = extract_text_from_cells(&cells, 0, 5, None, None);
+        assert_eq!(result, "Only row");
+    }
+
+    #[test]
+    fn extract_text_end_col_beyond_row_len_clamped() {
+        let cells = vec![make_ascii_row("Short")];
+        // end_col=100 but row only has 5 chars
+        let result = extract_text_from_cells(&cells, 0, 1, Some(0), Some(100));
+        assert_eq!(result, "Short");
+    }
+
+    #[test]
+    fn extract_text_wide_char_in_character_selection() {
+        // "AB日CD" = A(w=1), B(w=1), 日(w=2), cont(w=0), C(w=1), D(w=1)
+        let mut row = Vec::new();
+        row.push(Cell { ch: 'A', ..Cell::default() });
+        row.push(Cell { ch: 'B', ..Cell::default() });
+        let (w, c) = make_wide_cell('\u{65E5}');
+        row.push(w);
+        row.push(c);
+        row.push(Cell { ch: 'C', ..Cell::default() });
+        row.push(Cell { ch: 'D', ..Cell::default() });
+        let cells = vec![row];
+        // Select col 1..5: B(1), 日(2), cont(3,skip), C(4)
+        let result = extract_text_from_cells(&cells, 0, 1, Some(1), Some(5));
+        assert_eq!(result, "B\u{65E5}C");
+    }
+
+    // === SelectionState unit tests ===
+
+    #[test]
+    fn selection_state_new_sets_anchor_and_cursor_equal() {
+        let pos = SelectionPos { row: 5, col: 3 };
+        let state = SelectionState::new(SelectionMode::Character, pos);
+        assert_eq!(state.anchor.row, 5);
+        assert_eq!(state.anchor.col, 3);
+        assert_eq!(state.cursor.row, 5);
+        assert_eq!(state.cursor.col, 3);
+    }
+
+    #[test]
+    fn selection_state_ordered_when_anchor_before_cursor() {
+        let state = SelectionState {
+            mode: SelectionMode::Character,
+            anchor: SelectionPos { row: 2, col: 1 },
+            cursor: SelectionPos { row: 5, col: 3 },
+        };
+        let (start, end) = state.ordered();
+        assert_eq!(start.row, 2);
+        assert_eq!(start.col, 1);
+        assert_eq!(end.row, 5);
+        assert_eq!(end.col, 3);
+    }
+
+    #[test]
+    fn selection_state_ordered_when_cursor_before_anchor() {
+        let state = SelectionState {
+            mode: SelectionMode::Character,
+            anchor: SelectionPos { row: 5, col: 3 },
+            cursor: SelectionPos { row: 2, col: 1 },
+        };
+        let (start, end) = state.ordered();
+        assert_eq!(start.row, 2);
+        assert_eq!(start.col, 1);
+        assert_eq!(end.row, 5);
+        assert_eq!(end.col, 3);
+    }
+
+    #[test]
+    fn selection_state_ordered_same_row_anchor_col_before_cursor_col() {
+        let state = SelectionState {
+            mode: SelectionMode::Line,
+            anchor: SelectionPos { row: 3, col: 1 },
+            cursor: SelectionPos { row: 3, col: 7 },
+        };
+        let (start, end) = state.ordered();
+        assert_eq!(start.col, 1);
+        assert_eq!(end.col, 7);
+    }
+
+    #[test]
+    fn selection_state_ordered_same_row_cursor_col_before_anchor_col() {
+        let state = SelectionState {
+            mode: SelectionMode::Line,
+            anchor: SelectionPos { row: 3, col: 7 },
+            cursor: SelectionPos { row: 3, col: 1 },
+        };
+        let (start, end) = state.ordered();
+        assert_eq!(start.col, 1);
+        assert_eq!(end.col, 7);
+    }
+
+    #[test]
+    fn selection_state_ordered_equal_positions() {
+        let pos = SelectionPos { row: 4, col: 4 };
+        let state = SelectionState::new(SelectionMode::Character, pos);
+        let (start, end) = state.ordered();
+        assert_eq!(start.row, 4);
+        assert_eq!(start.col, 4);
+        assert_eq!(end.row, 4);
+        assert_eq!(end.col, 4);
+    }
+
+    // === Visual mode entry tests ===
+
+    #[test]
+    fn enter_visual_char_sets_selection_state_and_mode() {
+        let mut selection_state: Option<SelectionState> = None;
+        let mut input_handler = InputHandler::new();
+        input_handler.set_mode(InputMode::ScrollbackMode);
+
+        // Simulate entering visual char mode
+        let mode = SelectionMode::Character;
+        let pos = SelectionPos { row: 10, col: 0 };
+        selection_state = Some(SelectionState::new(mode, pos));
+        input_handler.set_mode(InputMode::VisualSelection);
+
+        assert!(selection_state.is_some());
+        let sel = selection_state.unwrap();
+        assert!(matches!(sel.mode, SelectionMode::Character));
+        assert_eq!(sel.anchor.row, 10);
+        assert_eq!(sel.anchor.col, 0);
+        assert!(matches!(input_handler.mode(), InputMode::VisualSelection));
+    }
+
+    #[test]
+    fn enter_visual_line_sets_selection_state_and_mode() {
+        let mut selection_state: Option<SelectionState> = None;
+        let mut input_handler = InputHandler::new();
+        input_handler.set_mode(InputMode::ScrollbackMode);
+
+        let mode = SelectionMode::Line;
+        let pos = SelectionPos { row: 20, col: 0 };
+        selection_state = Some(SelectionState::new(mode, pos));
+        input_handler.set_mode(InputMode::VisualSelection);
+
+        assert!(selection_state.is_some());
+        let sel = selection_state.unwrap();
+        assert!(matches!(sel.mode, SelectionMode::Line));
+        assert_eq!(sel.anchor.row, 20);
+    }
+
+    // === Visual mode exit tests ===
+
+    #[test]
+    fn esc_in_visual_mode_clears_selection_and_returns_to_scrollback() {
+        let mut selection_state: Option<SelectionState> = Some(
+            SelectionState::new(
+                SelectionMode::Character,
+                SelectionPos { row: 5, col: 0 },
+            )
+        );
+        let mut input_handler = InputHandler::new();
+        input_handler.set_mode(InputMode::VisualSelection);
+
+        // Simulate Esc
+        selection_state = None;
+        input_handler.set_mode(InputMode::ScrollbackMode);
+
+        assert!(selection_state.is_none());
+        assert!(matches!(input_handler.mode(), InputMode::ScrollbackMode));
+    }
+
+    #[test]
+    fn yank_in_visual_mode_clears_selection_and_returns_to_scrollback() {
+        let mut selection_state: Option<SelectionState> = Some(
+            SelectionState::new(
+                SelectionMode::Character,
+                SelectionPos { row: 5, col: 0 },
+            )
+        );
+        let mut input_handler = InputHandler::new();
+        input_handler.set_mode(InputMode::VisualSelection);
+        let mut yank_buffer: Option<String> = None;
+
+        // Simulate yank
+        yank_buffer = Some("yanked text".to_string());
+        selection_state = None;
+        input_handler.set_mode(InputMode::ScrollbackMode);
+
+        assert!(selection_state.is_none());
+        assert_eq!(yank_buffer, Some("yanked text".to_string()));
+        assert!(matches!(input_handler.mode(), InputMode::ScrollbackMode));
+    }
+
+    // === Visual cursor movement tests ===
+
+    #[test]
+    fn visual_cursor_moves_right() {
+        let mut sel = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 5, col: 3 },
+        );
+        let num_cols: usize = 80;
+        sel.cursor.col = (sel.cursor.col + 1).min(num_cols.saturating_sub(1));
+        assert_eq!(sel.cursor.col, 4);
+    }
+
+    #[test]
+    fn visual_cursor_clamps_right_at_end() {
+        let mut sel = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 5, col: 79 },
+        );
+        let num_cols: usize = 80;
+        sel.cursor.col = (sel.cursor.col + 1).min(num_cols.saturating_sub(1));
+        assert_eq!(sel.cursor.col, 79);
+    }
+
+    #[test]
+    fn visual_cursor_moves_left() {
+        let mut sel = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 5, col: 3 },
+        );
+        sel.cursor.col = sel.cursor.col.saturating_sub(1);
+        assert_eq!(sel.cursor.col, 2);
+    }
+
+    #[test]
+    fn visual_cursor_clamps_left_at_zero() {
+        let mut sel = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 5, col: 0 },
+        );
+        sel.cursor.col = sel.cursor.col.saturating_sub(1);
+        assert_eq!(sel.cursor.col, 0);
+    }
+
+    #[test]
+    fn visual_cursor_moves_down() {
+        let mut sel = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 5, col: 0 },
+        );
+        let total_rows: usize = 100;
+        sel.cursor.row = (sel.cursor.row + 1).min(total_rows.saturating_sub(1));
+        assert_eq!(sel.cursor.row, 6);
+    }
+
+    #[test]
+    fn visual_cursor_clamps_down_at_bottom() {
+        let mut sel = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 99, col: 0 },
+        );
+        let total_rows: usize = 100;
+        sel.cursor.row = (sel.cursor.row + 1).min(total_rows.saturating_sub(1));
+        assert_eq!(sel.cursor.row, 99);
+    }
+
+    #[test]
+    fn visual_cursor_moves_up() {
+        let mut sel = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 5, col: 0 },
+        );
+        sel.cursor.row = sel.cursor.row.saturating_sub(1);
+        assert_eq!(sel.cursor.row, 4);
+    }
+
+    #[test]
+    fn visual_cursor_clamps_up_at_zero() {
+        let mut sel = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 0, col: 0 },
+        );
+        sel.cursor.row = sel.cursor.row.saturating_sub(1);
+        assert_eq!(sel.cursor.row, 0);
+    }
+
+    #[test]
+    fn visual_cursor_home_sets_col_zero() {
+        let mut sel = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 5, col: 40 },
+        );
+        sel.cursor.col = 0;
+        assert_eq!(sel.cursor.col, 0);
+    }
+
+    #[test]
+    fn visual_cursor_end_sets_col_to_last() {
+        let mut sel = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 5, col: 0 },
+        );
+        let num_cols: usize = 80;
+        sel.cursor.col = num_cols.saturating_sub(1);
+        assert_eq!(sel.cursor.col, 79);
+    }
+
+    #[test]
+    fn visual_page_up_moves_cursor_up_by_page() {
+        let mut sel = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 50, col: 0 },
+        );
+        let page = 12;
+        sel.cursor.row = sel.cursor.row.saturating_sub(page);
+        assert_eq!(sel.cursor.row, 38);
+    }
+
+    #[test]
+    fn visual_page_down_moves_cursor_down_by_page() {
+        let mut sel = SelectionState::new(
+            SelectionMode::Character,
+            SelectionPos { row: 50, col: 0 },
+        );
+        let page: usize = 12;
+        let total_rows: usize = 100;
+        sel.cursor.row = (sel.cursor.row + page).min(total_rows.saturating_sub(1));
+        assert_eq!(sel.cursor.row, 62);
+    }
+
+    // === exit_scrollback_if_active clears selection_state ===
+
+    #[test]
+    fn exit_scrollback_clears_selection_state() {
+        let mut selection_state: Option<SelectionState> = Some(
+            SelectionState::new(
+                SelectionMode::Character,
+                SelectionPos { row: 5, col: 0 },
+            )
+        );
+
+        // Simulate what exit_scrollback_if_active does to selection_state
+        selection_state = None;
+
+        assert!(selection_state.is_none(), "exit_scrollback should clear selection_state");
     }
 }

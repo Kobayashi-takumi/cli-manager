@@ -1095,6 +1095,11 @@ impl ScreenPort for VteScreenAdapter {
         // VteScreenAdapter does not support scrollback search
         Ok(vec![])
     }
+
+    fn get_row_cells(&mut self, _id: TerminalId, _abs_row: usize) -> Result<Vec<Cell>, AppError> {
+        // VteScreenAdapter does not support scrollback row access
+        Ok(vec![])
+    }
 }
 
 #[cfg(test)]

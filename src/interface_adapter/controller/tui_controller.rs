@@ -38,6 +38,11 @@ pub enum AppAction {
     ScrollbackSearchPrev,
     ExitScrollbackSearch,
     ConfirmScrollbackSearch,
+    YankLine,
+    YankAllVisible,
+    PasteYankBuffer,
+    EnterVisualChar,
+    EnterVisualLine,
 }
 
 /// Thin controller that translates `AppAction`s into usecase calls.
@@ -110,6 +115,11 @@ impl<P: PtyPort, S: ScreenPort> TuiController<P, S> {
             | AppAction::ScrollbackSearchPrev
             | AppAction::ExitScrollbackSearch
             | AppAction::ConfirmScrollbackSearch => {} // Handled by caller (app_runner)
+            AppAction::YankLine
+            | AppAction::YankAllVisible
+            | AppAction::PasteYankBuffer
+            | AppAction::EnterVisualChar
+            | AppAction::EnterVisualLine => {} // Handled by caller (app_runner)
         }
         Ok(())
     }
@@ -321,6 +331,10 @@ mod tests {
         }
 
         fn search_scrollback(&mut self, _id: TerminalId, _query: &str) -> Result<Vec<SearchMatch>, AppError> {
+            Ok(vec![])
+        }
+
+        fn get_row_cells(&mut self, _id: TerminalId, _abs_row: usize) -> Result<Vec<Cell>, AppError> {
             Ok(vec![])
         }
     }
@@ -1070,4 +1084,49 @@ mod tests {
         let result = ctrl.dispatch(AppAction::ConfirmScrollbackSearch, size);
         assert!(result.is_ok());
     }
+
+    // =========================================================================
+    // Tests: dispatch(yank buffer actions) - Task #90
+    // =========================================================================
+
+    #[test]
+    fn dispatch_yank_line_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::YankLine, size);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_yank_all_visible_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::YankAllVisible, size);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_paste_yank_buffer_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::PasteYankBuffer, size);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_enter_visual_char_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::EnterVisualChar, size);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_enter_visual_line_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::EnterVisualLine, size);
+        assert!(result.is_ok());
+    }
+
 }

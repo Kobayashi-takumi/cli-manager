@@ -22,6 +22,7 @@ pub enum InputMode {
     HelpView,
     MiniTerminalInput,
     ScrollbackSearch,
+    VisualSelection,
 }
 
 /// Converts crossterm `KeyEvent`s into `AppAction`s using a prefix-key state
@@ -79,6 +80,7 @@ impl InputHandler {
             InputMode::HelpView => None,
             InputMode::MiniTerminalInput => self.handle_mini_terminal(key),
             InputMode::ScrollbackSearch => None, // Handled by caller (app_runner)
+            InputMode::VisualSelection => None, // Handled by caller (app_runner)
         }
     }
 
@@ -130,6 +132,14 @@ impl InputHandler {
             KeyCode::PageDown => Some(AppAction::ScrollbackPageDown),
             KeyCode::Char('g') => Some(AppAction::ScrollbackTop),
             KeyCode::Char('G') => Some(AppAction::ScrollbackBottom),
+            KeyCode::Char('y') => Some(AppAction::YankLine),
+            KeyCode::Char('Y') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                Some(AppAction::YankAllVisible)
+            }
+            KeyCode::Char('v') => Some(AppAction::EnterVisualChar),
+            KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                Some(AppAction::EnterVisualLine)
+            }
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.mode = InputMode::Normal;
                 Some(AppAction::ExitScrollback)
@@ -161,6 +171,7 @@ impl InputHandler {
             KeyCode::Char('?') if key.modifiers.is_empty() => Some(AppAction::ShowHelp),
             KeyCode::Char('`') if key.modifiers.is_empty() => Some(AppAction::ToggleMiniTerminal),
             KeyCode::Char('f') if key.modifiers.is_empty() => Some(AppAction::OpenQuickSwitcher),
+            KeyCode::Char(']') if key.modifiers.is_empty() => Some(AppAction::PasteYankBuffer),
             // Ctrl+b again -> send literal Ctrl+b to child process
             KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(AppAction::WriteToActive(vec![0x02]))
@@ -1614,5 +1625,97 @@ mod tests {
         handler.set_mode(InputMode::ScrollbackSearch);
         handler.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(matches!(handler.mode(), InputMode::ScrollbackSearch));
+    }
+
+    // =========================================================================
+    // Tests: Scrollback yank/visual keybindings (Task #91)
+    // =========================================================================
+
+    #[test]
+    fn scrollback_y_produces_yank_line() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::YankLine)));
+        assert_scrollback_mode(&handler);
+    }
+
+    #[test]
+    fn scrollback_shift_y_produces_yank_all_visible() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+        assert!(matches!(action, Some(AppAction::YankAllVisible)));
+        assert_scrollback_mode(&handler);
+    }
+
+    #[test]
+    fn scrollback_v_produces_enter_visual_char() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::EnterVisualChar)));
+        assert_scrollback_mode(&handler);
+    }
+
+    #[test]
+    fn scrollback_shift_v_produces_enter_visual_line() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('V'), KeyModifiers::SHIFT));
+        assert!(matches!(action, Some(AppAction::EnterVisualLine)));
+        assert_scrollback_mode(&handler);
+    }
+
+    // =========================================================================
+    // Tests: Prefix ] paste keybinding (Task #91)
+    // =========================================================================
+
+    #[test]
+    fn prefix_right_bracket_produces_paste_yank_buffer() {
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        let key = make_key(KeyCode::Char(']'), KeyModifiers::NONE);
+        let action = handler.handle_key(key);
+
+        assert!(matches!(action, Some(AppAction::PasteYankBuffer)));
+        assert_normal(&handler);
+    }
+
+    // =========================================================================
+    // Tests: VisualSelection mode (Task #91)
+    // =========================================================================
+
+    #[test]
+    fn visual_selection_mode_returns_none_for_any_key() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::VisualSelection);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn visual_selection_mode_stays_in_mode() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::VisualSelection);
+
+        handler.handle_key(make_key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(matches!(handler.mode(), InputMode::VisualSelection));
+    }
+
+    #[test]
+    fn visual_selection_mode_ignores_ctrl_b() {
+        let mut handler = InputHandler::new();
+        handler.set_mode(InputMode::VisualSelection);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(action.is_none());
+        assert!(matches!(handler.mode(), InputMode::VisualSelection));
     }
 }

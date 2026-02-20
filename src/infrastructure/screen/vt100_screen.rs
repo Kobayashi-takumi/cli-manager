@@ -505,6 +505,49 @@ impl ScreenPort for Vt100ScreenAdapter {
 
         Ok(matches)
     }
+
+    fn get_row_cells(&mut self, id: TerminalId, abs_row: usize) -> Result<Vec<Cell>, AppError> {
+        let inst = self
+            .instances
+            .get_mut(&id)
+            .ok_or(AppError::ScreenNotFound(id))?;
+
+        let screen = inst.parser.screen();
+        let rows = screen.size().0 as usize;
+        let cols = screen.size().1 as usize;
+        let max_scrollback = inst.cached_max_scrollback;
+        let total_rows = max_scrollback + rows;
+
+        // Out-of-range check
+        if abs_row >= total_rows {
+            return Ok(vec![]);
+        }
+
+        // Save the current scrollback offset so we can restore it afterwards.
+        let saved_offset = inst.parser.screen().scrollback();
+
+        // Set scrollback offset such that abs_row appears as display row 0.
+        // When offset = max_scrollback, screen row 0 = scrollback top (abs_row 0).
+        // When offset = 0, screen row 0 = first visible line (abs_row max_scrollback).
+        // So: offset_needed = max_scrollback - abs_row
+        let offset_needed = max_scrollback.saturating_sub(abs_row);
+        inst.parser.screen_mut().set_scrollback(offset_needed);
+
+        // Read cells from display row 0
+        let mut result = Vec::with_capacity(cols);
+        for col in 0..cols {
+            if let Some(vt_cell) = inst.parser.screen().cell(0, col as u16) {
+                result.push(convert_cell(vt_cell));
+            } else {
+                result.push(Cell::default());
+            }
+        }
+
+        // Restore the original scrollback offset.
+        inst.parser.screen_mut().set_scrollback(saved_offset);
+
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -1978,5 +2021,135 @@ mod tests {
         assert_eq!(matches.len(), 1);
         // FIRST_LINE should be at row 0 (scrollback top)
         assert_eq!(matches[0].row, 0, "Earliest scrollback line should be row 0");
+    }
+
+    // ─── get_row_cells tests ───
+
+    #[test]
+    fn get_row_cells_visible_screen_row() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let size = TerminalSize::new(10, 3);
+        adapter.create(id(1), size).unwrap();
+
+        // Write "HELLO" on first visible row (row 0 of screen)
+        adapter.process(id(1), b"HELLO").unwrap();
+
+        let max_sb = adapter.get_max_scrollback(id(1)).unwrap();
+        // abs_row for first visible row = max_scrollback + 0
+        let cells = adapter.get_row_cells(id(1), max_sb).unwrap();
+
+        assert_eq!(cells.len(), 10);
+        assert_eq!(cells[0].ch, 'H');
+        assert_eq!(cells[1].ch, 'E');
+        assert_eq!(cells[2].ch, 'L');
+        assert_eq!(cells[3].ch, 'L');
+        assert_eq!(cells[4].ch, 'O');
+    }
+
+    #[test]
+    fn get_row_cells_scrollback_buffer_row() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let size = TerminalSize::new(10, 3);
+        adapter.create(id(1), size).unwrap();
+
+        // Write content that pushes first line into scrollback.
+        // Screen has 3 rows, so after 4 lines the first line scrolls off.
+        adapter.process(id(1), b"LINE_ONE\r\n").unwrap();
+        adapter.process(id(1), b"LINE_TWO\r\n").unwrap();
+        adapter.process(id(1), b"LINE_THREE\r\n").unwrap();
+        adapter.process(id(1), b"LINE_FOUR\r\n").unwrap();
+        adapter.process(id(1), b"LINE_FIVE").unwrap();
+
+        let max_sb = adapter.get_max_scrollback(id(1)).unwrap();
+        assert!(max_sb > 0, "Should have scrollback lines");
+
+        // abs_row 0 = top of scrollback buffer = LINE_ONE
+        let cells = adapter.get_row_cells(id(1), 0).unwrap();
+        assert_eq!(cells[0].ch, 'L');
+        assert_eq!(cells[1].ch, 'I');
+        assert_eq!(cells[2].ch, 'N');
+        assert_eq!(cells[3].ch, 'E');
+        assert_eq!(cells[4].ch, '_');
+        assert_eq!(cells[5].ch, 'O');
+        assert_eq!(cells[6].ch, 'N');
+        assert_eq!(cells[7].ch, 'E');
+    }
+
+    #[test]
+    fn get_row_cells_out_of_range_returns_empty() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let size = TerminalSize::new(10, 3);
+        adapter.create(id(1), size).unwrap();
+
+        adapter.process(id(1), b"Hello").unwrap();
+
+        let max_sb = adapter.get_max_scrollback(id(1)).unwrap();
+        let total_rows = max_sb + 3; // screen has 3 rows
+
+        // abs_row beyond total should return empty Vec
+        let cells = adapter.get_row_cells(id(1), total_rows).unwrap();
+        assert!(cells.is_empty());
+
+        let cells = adapter.get_row_cells(id(1), total_rows + 100).unwrap();
+        assert!(cells.is_empty());
+    }
+
+    #[test]
+    fn get_row_cells_preserves_scrollback_offset() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let size = TerminalSize::new(10, 3);
+        adapter.create(id(1), size).unwrap();
+
+        // Push lines into scrollback
+        for i in 0..10 {
+            let line = format!("Line {:04}\r\n", i);
+            adapter.process(id(1), line.as_bytes()).unwrap();
+        }
+
+        // Set a specific scrollback offset
+        adapter.set_scrollback_offset(id(1), 3).unwrap();
+        let offset_before = adapter.get_scrollback_offset(id(1)).unwrap();
+        assert_eq!(offset_before, 3);
+
+        // Call get_row_cells
+        let _cells = adapter.get_row_cells(id(1), 0).unwrap();
+
+        // The scrollback offset must be unchanged
+        let offset_after = adapter.get_scrollback_offset(id(1)).unwrap();
+        assert_eq!(offset_after, offset_before, "Scrollback offset must be preserved after get_row_cells");
+    }
+
+    #[test]
+    fn get_row_cells_content_correctness_with_attributes() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let size = TerminalSize::new(20, 3);
+        adapter.create(id(1), size).unwrap();
+
+        // Write bold text on first row
+        adapter.process(id(1), b"\x1b[1mBOLD\x1b[0m normal").unwrap();
+
+        let max_sb = adapter.get_max_scrollback(id(1)).unwrap();
+        let cells = adapter.get_row_cells(id(1), max_sb).unwrap();
+
+        // Bold cells
+        assert_eq!(cells[0].ch, 'B');
+        assert!(cells[0].bold);
+        assert_eq!(cells[1].ch, 'O');
+        assert!(cells[1].bold);
+        assert_eq!(cells[2].ch, 'L');
+        assert!(cells[2].bold);
+        assert_eq!(cells[3].ch, 'D');
+        assert!(cells[3].bold);
+
+        // Non-bold cells after reset
+        assert_eq!(cells[5].ch, 'n');
+        assert!(!cells[5].bold);
+    }
+
+    #[test]
+    fn get_row_cells_screen_not_found_error() {
+        let mut adapter = Vt100ScreenAdapter::new();
+        let result = adapter.get_row_cells(id(99), 0);
+        assert!(result.is_err());
     }
 }

@@ -67,4 +67,10 @@ pub trait ScreenPort: Send + Sync {
     /// Takes `&mut self` because the implementation needs to temporarily adjust scrollback offset
     /// to read all scrollback buffer rows.
     fn search_scrollback(&mut self, id: TerminalId, query: &str) -> Result<Vec<SearchMatch>, AppError>;
+
+    /// Get cells for an absolute row in the scrollback buffer + screen.
+    /// `abs_row` 0 = scrollback buffer top, max_scrollback = first visible row,
+    /// max_scrollback + screen_rows - 1 = last visible row.
+    /// Returns an empty Vec if abs_row is beyond the total number of rows.
+    fn get_row_cells(&mut self, id: TerminalId, abs_row: usize) -> Result<Vec<Cell>, AppError>;
 }
