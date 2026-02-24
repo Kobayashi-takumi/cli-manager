@@ -1,3 +1,4 @@
+pub mod ipc;
 pub mod notification;
 pub mod pty;
 pub mod screen;

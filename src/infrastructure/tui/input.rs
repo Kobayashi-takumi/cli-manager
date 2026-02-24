@@ -36,6 +36,7 @@ pub enum InputMode {
 pub struct InputHandler {
     mode: InputMode,
     application_cursor_keys: bool,
+    pending_target: Option<u32>,
 }
 
 impl InputHandler {
@@ -43,6 +44,7 @@ impl InputHandler {
         Self {
             mode: InputMode::Normal,
             application_cursor_keys: false,
+            pending_target: None,
         }
     }
 
@@ -94,6 +96,7 @@ impl InputHandler {
             && since.elapsed().as_millis() > 1000
         {
             self.mode = InputMode::Normal;
+            self.pending_target = None;
             return Some(AppAction::WriteToActive(vec![0x02]));
         }
         None
@@ -149,6 +152,26 @@ impl InputHandler {
     }
 
     fn handle_prefix(&mut self, key: KeyEvent) -> Option<AppAction> {
+        // Check if we have a pending target digit (from a prior digit press)
+        if let Some(target) = self.pending_target.take() {
+            // A digit was stored. Check if ']' follows for PasteToTarget.
+            if key.code == KeyCode::Char(']') && key.modifiers.is_empty() {
+                self.mode = InputMode::Normal;
+                return Some(AppAction::PasteToTarget(target));
+            }
+            // Not ']' — check if it's another digit (replace pending target)
+            if let KeyCode::Char(c @ '1'..='9') = key.code
+                && key.modifiers.is_empty()
+            {
+                self.pending_target = Some(c as u32 - '0' as u32);
+                // Stay in PrefixWait (timestamp refreshed)
+                self.mode = InputMode::PrefixWait(Instant::now());
+                return None;
+            }
+            // Fall through: process this key as a normal prefix command
+            // (the digit was consumed without producing SelectByIndex)
+        }
+
         self.mode = InputMode::Normal; // Always return to Normal
 
         match key.code {
@@ -159,7 +182,10 @@ impl InputHandler {
             KeyCode::Char('n') if key.modifiers.is_empty() => Some(AppAction::SelectNext),
             KeyCode::Char('p') if key.modifiers.is_empty() => Some(AppAction::SelectPrev),
             KeyCode::Char(c @ '1'..='9') if key.modifiers.is_empty() => {
-                Some(AppAction::SelectByIndex((c as u8 - b'1') as usize))
+                // Store digit and stay in PrefixWait
+                self.pending_target = Some(c as u32 - '0' as u32);
+                self.mode = InputMode::PrefixWait(Instant::now());
+                None
             }
             KeyCode::Char('q') if key.modifiers.is_empty() => Some(AppAction::Quit),
             KeyCode::Char('o') if key.modifiers.is_empty() => Some(AppAction::ToggleFocus),
@@ -595,39 +621,39 @@ mod tests {
     }
 
     #[test]
-    fn prefix_1_selects_index_0() {
+    fn prefix_1_stores_pending_target_and_stays_prefix() {
         let mut handler = InputHandler::new();
         enter_prefix(&mut handler);
 
         let key = make_key(KeyCode::Char('1'), KeyModifiers::NONE);
         let action = handler.handle_key(key);
 
-        assert!(matches!(action, Some(AppAction::SelectByIndex(0))));
-        assert_normal(&handler);
+        assert!(action.is_none(), "digit should not produce an action immediately");
+        assert_prefix_wait(&handler);
     }
 
     #[test]
-    fn prefix_5_selects_index_4() {
+    fn prefix_5_stores_pending_target_and_stays_prefix() {
         let mut handler = InputHandler::new();
         enter_prefix(&mut handler);
 
         let key = make_key(KeyCode::Char('5'), KeyModifiers::NONE);
         let action = handler.handle_key(key);
 
-        assert!(matches!(action, Some(AppAction::SelectByIndex(4))));
-        assert_normal(&handler);
+        assert!(action.is_none(), "digit should not produce an action immediately");
+        assert_prefix_wait(&handler);
     }
 
     #[test]
-    fn prefix_9_selects_index_8() {
+    fn prefix_9_stores_pending_target_and_stays_prefix() {
         let mut handler = InputHandler::new();
         enter_prefix(&mut handler);
 
         let key = make_key(KeyCode::Char('9'), KeyModifiers::NONE);
         let action = handler.handle_key(key);
 
-        assert!(matches!(action, Some(AppAction::SelectByIndex(8))));
-        assert_normal(&handler);
+        assert!(action.is_none(), "digit should not produce an action immediately");
+        assert_prefix_wait(&handler);
     }
 
     #[test]
@@ -1008,16 +1034,8 @@ mod tests {
     }
 
     #[test]
-    fn prefix_digits_2_through_8() {
-        for (digit, expected_index) in [
-            ('2', 1usize),
-            ('3', 2),
-            ('4', 3),
-            ('5', 4),
-            ('6', 5),
-            ('7', 6),
-            ('8', 7),
-        ] {
+    fn prefix_digits_2_through_8_store_pending_and_stay_prefix() {
+        for digit in ['2', '3', '4', '5', '6', '7', '8'] {
             let mut handler = InputHandler::new();
             enter_prefix(&mut handler);
 
@@ -1025,12 +1043,11 @@ mod tests {
             let action = handler.handle_key(key);
 
             assert!(
-                matches!(action, Some(AppAction::SelectByIndex(idx)) if idx == expected_index),
-                "digit '{}' should map to SelectByIndex({})",
+                action.is_none(),
+                "digit '{}' should not produce an action immediately",
                 digit,
-                expected_index
             );
-            assert_normal(&handler);
+            assert_prefix_wait(&handler);
         }
     }
 
@@ -1717,5 +1734,168 @@ mod tests {
         let action = handler.handle_key(make_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
         assert!(action.is_none());
         assert!(matches!(handler.mode(), InputMode::VisualSelection));
+    }
+
+    // =========================================================================
+    // Tests: PasteToTarget (Ctrl+b <digit> ]) — Task #112
+    // =========================================================================
+
+    #[test]
+    fn prefix_digit_bracket_produces_paste_to_target() {
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        // Press '2' — stores pending target, stays in PrefixWait
+        let action = handler.handle_key(make_key(KeyCode::Char('2'), KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_prefix_wait(&handler);
+
+        // Press ']' — produces PasteToTarget(2)
+        let action = handler.handle_key(make_key(KeyCode::Char(']'), KeyModifiers::NONE));
+        assert!(
+            matches!(action, Some(AppAction::PasteToTarget(2))),
+            "Ctrl+b 2 ] should produce PasteToTarget(2)"
+        );
+        assert_normal(&handler);
+    }
+
+    #[test]
+    fn prefix_digit_3_bracket_produces_paste_to_target_3() {
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('3'), KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_prefix_wait(&handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char(']'), KeyModifiers::NONE));
+        assert!(
+            matches!(action, Some(AppAction::PasteToTarget(3))),
+            "Ctrl+b 3 ] should produce PasteToTarget(3)"
+        );
+        assert_normal(&handler);
+    }
+
+    #[test]
+    fn prefix_digit_9_bracket_produces_paste_to_target_9() {
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('9'), KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_prefix_wait(&handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char(']'), KeyModifiers::NONE));
+        assert!(
+            matches!(action, Some(AppAction::PasteToTarget(9))),
+            "Ctrl+b 9 ] should produce PasteToTarget(9)"
+        );
+        assert_normal(&handler);
+    }
+
+    #[test]
+    fn prefix_bracket_without_digit_still_produces_paste_yank_buffer() {
+        // Ensure existing behavior: Ctrl+b ] (no digit) -> PasteYankBuffer
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char(']'), KeyModifiers::NONE));
+        assert!(
+            matches!(action, Some(AppAction::PasteYankBuffer)),
+            "Ctrl+b ] (no digit) should still produce PasteYankBuffer"
+        );
+        assert_normal(&handler);
+    }
+
+    #[test]
+    fn prefix_digit_then_non_bracket_processes_as_prefix() {
+        // Ctrl+b 2 n -> digit consumed, n processed as prefix -> SelectNext
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('2'), KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_prefix_wait(&handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(
+            matches!(action, Some(AppAction::SelectNext)),
+            "Ctrl+b 2 n should produce SelectNext (digit consumed, n processed as prefix)"
+        );
+        assert_normal(&handler);
+    }
+
+    #[test]
+    fn prefix_digit_then_c_processes_as_create() {
+        // Ctrl+b 5 c -> digit consumed, c processed as prefix -> CreateTerminal
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('5'), KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_prefix_wait(&handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(
+            matches!(action, Some(AppAction::CreateTerminal { name: None })),
+            "Ctrl+b 5 c should produce CreateTerminal (digit consumed)"
+        );
+        assert_normal(&handler);
+    }
+
+    #[test]
+    fn prefix_digit_then_unknown_key_returns_none() {
+        // Ctrl+b 2 z -> digit consumed, z is unknown -> None
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('2'), KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_prefix_wait(&handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert!(action.is_none(), "Ctrl+b 2 z should produce None (unknown key)");
+        assert_normal(&handler);
+    }
+
+    #[test]
+    fn prefix_digit_then_digit_replaces_pending_target() {
+        // Ctrl+b 2 3 ] -> second digit replaces first, produces PasteToTarget(3)
+        let mut handler = InputHandler::new();
+        enter_prefix(&mut handler);
+
+        // First digit
+        let action = handler.handle_key(make_key(KeyCode::Char('2'), KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_prefix_wait(&handler);
+
+        // Second digit replaces first pending target
+        let action = handler.handle_key(make_key(KeyCode::Char('3'), KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_prefix_wait(&handler);
+
+        // Bracket produces PasteToTarget with the second digit
+        let action = handler.handle_key(make_key(KeyCode::Char(']'), KeyModifiers::NONE));
+        assert!(
+            matches!(action, Some(AppAction::PasteToTarget(3))),
+            "Ctrl+b 2 3 ] should produce PasteToTarget(3) (second digit replaces first)"
+        );
+        assert_normal(&handler);
+    }
+
+    #[test]
+    fn timeout_resets_pending_target() {
+        let mut handler = InputHandler::new();
+        // Manually set a PrefixWait with an old timestamp to simulate timeout
+        handler.mode = InputMode::PrefixWait(Instant::now() - std::time::Duration::from_secs(2));
+        handler.pending_target = Some(5);
+
+        let action = handler.check_timeout();
+
+        // Timeout fires, returns WriteToActive with literal Ctrl+b
+        assert!(matches!(action, Some(AppAction::WriteToActive(ref b)) if b == &[0x02]));
+        assert_normal(&handler);
+        // pending_target should be reset
+        assert!(handler.pending_target.is_none(), "pending_target should be None after timeout");
     }
 }

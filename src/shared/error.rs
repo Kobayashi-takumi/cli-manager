@@ -23,4 +23,7 @@ pub enum AppError {
 
     #[error("TUI error: {0}")]
     Tui(#[source] std::io::Error),
+
+    #[error("IPC error: {0}")]
+    IpcError(String),
 }

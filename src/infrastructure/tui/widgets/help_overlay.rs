@@ -78,7 +78,6 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
         &[
             ("n/\u{2193}", "Next terminal"),
             ("p/\u{2191}", "Previous terminal"),
-            ("1-9", "Jump to #N"),
             ("f", "Quick switch"),
             ("o", "Toggle pane"),
         ],
@@ -145,7 +144,14 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" Paste yank"),
+        Span::raw(" Paste yank    "),
+        Span::styled(
+            "<N> ]",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" Paste to #N"),
     ]);
     let general = Paragraph::new(vec![general_header, general_content]);
     frame.render_widget(general, sections[3]);
@@ -346,8 +352,8 @@ mod tests {
             "Expected 'Previous terminal' keybinding"
         );
         assert!(
-            content.contains("Jump to #N"),
-            "Expected 'Jump to #N' keybinding"
+            content.contains("Quick switch"),
+            "Expected 'Quick switch' keybinding"
         );
     }
 
@@ -461,6 +467,16 @@ mod tests {
         assert!(
             content.contains("Paste yank"),
             "Expected 'Paste yank' keybinding in GENERAL section"
+        );
+    }
+
+    #[test]
+    fn help_overlay_renders_paste_to_target_keybinding() {
+        let buf = render_help(80, 28);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("Paste to #N"),
+            "Expected 'Paste to #N' keybinding in GENERAL section"
         );
     }
 }

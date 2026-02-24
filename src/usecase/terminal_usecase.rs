@@ -185,6 +185,10 @@ impl<P: PtyPort, S: ScreenPort> TerminalUsecase<P, S> {
         self.active_index.map(|i| &self.terminals[i])
     }
 
+    pub fn get_terminal_by_id(&self, id: TerminalId) -> Option<&ManagedTerminal> {
+        self.terminals.iter().find(|t| t.id() == id)
+    }
+
     /// Drain and return all pending notification events collected during `poll_all()`.
     /// Each entry is a `(terminal_name, notification_event)` pair.
     /// After calling this method, the internal pending list is cleared.
@@ -1574,5 +1578,56 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, id);
         assert_eq!(calls[0].1, b"test data");
+    }
+
+    // =========================================================================
+    // Tests: get_terminal_by_id
+    // =========================================================================
+
+    #[test]
+    fn get_terminal_by_id_returns_matching_terminal() {
+        let mut uc = make_usecase();
+        let size = default_size();
+
+        let id1 = uc.create_terminal(Some("t1".to_string()), size).unwrap();
+        let _id2 = uc.create_terminal(Some("t2".to_string()), size).unwrap();
+
+        let terminal = uc.get_terminal_by_id(id1);
+        assert!(terminal.is_some());
+        assert_eq!(terminal.unwrap().name(), "t1");
+        assert_eq!(terminal.unwrap().id(), id1);
+    }
+
+    #[test]
+    fn get_terminal_by_id_returns_none_for_unknown_id() {
+        let mut uc = make_usecase();
+        let size = default_size();
+
+        uc.create_terminal(None, size).unwrap();
+
+        let result = uc.get_terminal_by_id(TerminalId::new(999));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_terminal_by_id_returns_none_on_empty_list() {
+        let uc = make_usecase();
+
+        let result = uc.get_terminal_by_id(TerminalId::new(1));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_terminal_by_id_finds_second_terminal() {
+        let mut uc = make_usecase();
+        let size = default_size();
+
+        let _id1 = uc.create_terminal(Some("first".to_string()), size).unwrap();
+        let id2 = uc.create_terminal(Some("second".to_string()), size).unwrap();
+        let _id3 = uc.create_terminal(Some("third".to_string()), size).unwrap();
+
+        let terminal = uc.get_terminal_by_id(id2);
+        assert!(terminal.is_some());
+        assert_eq!(terminal.unwrap().name(), "second");
     }
 }

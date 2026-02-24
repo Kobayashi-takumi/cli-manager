@@ -41,6 +41,7 @@ pub enum AppAction {
     YankLine,
     YankAllVisible,
     PasteYankBuffer,
+    PasteToTarget(u32),
     EnterVisualChar,
     EnterVisualLine,
 }
@@ -118,6 +119,7 @@ impl<P: PtyPort, S: ScreenPort> TuiController<P, S> {
             AppAction::YankLine
             | AppAction::YankAllVisible
             | AppAction::PasteYankBuffer
+            | AppAction::PasteToTarget(_)
             | AppAction::EnterVisualChar
             | AppAction::EnterVisualLine => {} // Handled by caller (app_runner)
         }
@@ -1126,6 +1128,14 @@ mod tests {
         let mut ctrl = make_controller();
         let size = default_size();
         let result = ctrl.dispatch(AppAction::EnterVisualLine, size);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_paste_to_target_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::PasteToTarget(2), size);
         assert!(result.is_ok());
     }
 

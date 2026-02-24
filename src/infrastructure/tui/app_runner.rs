@@ -21,14 +21,14 @@ fn char_to_byte_index(s: &str, char_pos: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-use crate::domain::primitive::{Cell, CursorStyle, SearchMatch, TerminalId, TerminalSize};
+use crate::domain::primitive::{Cell, CursorPos, CursorStyle, IpcCommand, IpcResponse, IpcResponseData, SearchMatch, TerminalId, TerminalSize, WindowInfo};
 use crate::infrastructure::notification::MacOsNotifier;
 use crate::infrastructure::tui::input::{InputHandler, InputMode};
 use crate::infrastructure::tui::fuzzy_matcher;
 use crate::infrastructure::tui::widgets::{dialog, help_overlay, layout, memo_overlay, mini_terminal_view, quick_switcher, search_bar, sidebar, terminal_view};
 use crate::infrastructure::tui::widgets::quick_switcher::QuickSwitchItem;
 use crate::interface_adapter::controller::tui_controller::{AppAction, TuiController};
-use crate::interface_adapter::port::{PtyPort, ScreenPort};
+use crate::interface_adapter::port::{IpcPort, PtyPort, ScreenPort};
 
 /// Height in rows for the mini terminal pane.
 pub(crate) const MINI_TERMINAL_HEIGHT: u16 = 10;
@@ -252,7 +252,7 @@ fn extract_text_from_cells(
 ///
 /// Initializes crossterm raw mode + alternate screen, creates the ratatui Terminal,
 /// runs the draw -> poll -> input loop, and cleans up on exit.
-pub fn run<P: PtyPort, S: ScreenPort>(mut controller: TuiController<P, S>) -> anyhow::Result<()> {
+pub fn run<P: PtyPort, S: ScreenPort>(mut controller: TuiController<P, S>, mut ipc_port: Option<Box<dyn IpcPort>>) -> anyhow::Result<()> {
     // === Initialization ===
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -283,6 +283,7 @@ pub fn run<P: PtyPort, S: ScreenPort>(mut controller: TuiController<P, S>) -> an
         &mut scrollback_target,
         &mut last_cursor_style,
         &mut search_state,
+        &mut ipc_port,
     );
 
     // === Cleanup (always runs) ===
@@ -305,6 +306,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
     scrollback_target: &mut Option<ScrollbackTarget>,
     last_cursor_style: &mut CursorStyle,
     search_state: &mut Option<SearchState>,
+    ipc_port: &mut Option<Box<dyn IpcPort>>,
 ) -> anyhow::Result<()> {
     let mut mini_terminal = MiniTerminalState::new();
     let mut yank_buffer: Option<String> = None;
@@ -844,6 +846,19 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
             notifier.notify(terminal_name, event);
         }
 
+        // 3.6. Poll IPC commands
+        if let Some(ipc) = ipc_port.as_mut() {
+            let commands = ipc.poll_commands();
+            for (conn_id, command) in commands {
+                let response = handle_ipc_command(
+                    &command,
+                    controller,
+                    &mut yank_buffer,
+                );
+                ipc.send_response(conn_id, response);
+            }
+        }
+
         // 4. Check prefix timeout
         if let Some(action) = input_handler.check_timeout() {
             match controller.dispatch(action, size) {
@@ -940,7 +955,163 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
         let _ = controller.usecase_mut().screen_port_mut().remove(mid);
     }
 
+    // Cleanup IPC
+    if let Some(ipc) = ipc_port.as_mut() {
+        ipc.shutdown();
+    }
+
     Ok(())
+}
+
+/// Handle a single IPC command and return the response.
+fn handle_ipc_command<P: PtyPort, S: ScreenPort>(
+    command: &IpcCommand,
+    controller: &mut TuiController<P, S>,
+    yank_buffer: &mut Option<String>,
+) -> IpcResponse {
+    match command {
+        IpcCommand::SendKeys { target, keys } => {
+            // Parse keys to bytes
+            let data = match crate::infrastructure::ipc::key_parser::parse_keys(keys) {
+                Ok(bytes) => bytes,
+                Err(e) => return IpcResponse::Error(format!("key parse error: {}", e)),
+            };
+            let tid = TerminalId::new(*target);
+            // Check terminal exists
+            if controller.usecase().get_terminal_by_id(tid).is_none() {
+                return IpcResponse::Error(format!("terminal not found: {}", target));
+            }
+            // Write to PTY (empty data is OK, just return Ok)
+            if data.is_empty() {
+                return IpcResponse::Ok;
+            }
+            match controller.usecase_mut().pty_port_mut().write(tid, &data) {
+                Ok(()) => IpcResponse::Ok,
+                Err(e) => IpcResponse::Error(format!("write error: {}", e)),
+            }
+        }
+        IpcCommand::CapturePane { target, include_scrollback } => {
+            let tid = TerminalId::new(*target);
+            // Check terminal exists
+            let (name, cwd_fallback) = match controller.usecase().get_terminal_by_id(tid) {
+                Some(t) => (t.name().to_string(), t.cwd().display().to_string()),
+                None => return IpcResponse::Error(format!("terminal not found: {}", target)),
+            };
+
+            // Get text content
+            let text = if *include_scrollback {
+                // Get scrollback + visible content using get_row_cells
+                let max_sb = controller.usecase().screen_port().get_max_scrollback(tid).unwrap_or(0);
+                let visible_rows = controller.usecase().screen_port().get_cells(tid)
+                    .map(|c| c.len()).unwrap_or(0);
+                let total_rows = max_sb + visible_rows;
+
+                let mut lines: Vec<String> = Vec::new();
+                for abs_row in 0..total_rows {
+                    let row_cells = controller.usecase_mut().screen_port_mut().get_row_cells(tid, abs_row);
+                    match row_cells {
+                        Ok(row) => {
+                            let mut line = String::new();
+                            for cell in &row {
+                                if cell.width == 0 { continue; }
+                                line.push(cell.ch);
+                            }
+                            lines.push(line.trim_end().to_string());
+                        }
+                        Err(_) => break,
+                    }
+                }
+                // Remove trailing empty lines
+                while lines.last().is_some_and(|l| l.is_empty()) {
+                    lines.pop();
+                }
+                lines.join("\n")
+            } else {
+                // Get only visible content
+                match controller.usecase().screen_port().get_cells(tid) {
+                    Ok(cells) => extract_text_from_cells(cells, 0, cells.len(), None, None),
+                    Err(_) => String::new(),
+                }
+            };
+
+            // Get metadata
+            let cursor = controller.usecase().screen_port().get_cursor(tid)
+                .unwrap_or(CursorPos::default());
+            let (size_rows, size_cols) = match controller.usecase().screen_port().get_cells(tid) {
+                Ok(cells) => (cells.len(), cells.first().map_or(0, |r| r.len())),
+                Err(_) => (0, 0),
+            };
+            let cwd = controller.usecase().screen_port().get_cwd(tid)
+                .ok()
+                .flatten()
+                .or_else(|| Some(cwd_fallback));
+            let scrollback_total = controller.usecase().screen_port().get_max_scrollback(tid).unwrap_or(0);
+
+            IpcResponse::OkWithData(IpcResponseData::CapturePane {
+                text,
+                cursor_row: cursor.row as usize,
+                cursor_col: cursor.col as usize,
+                size_rows,
+                size_cols,
+                name,
+                cwd,
+                scrollback_total,
+            })
+        }
+        IpcCommand::ListWindows => {
+            let terminals = controller.usecase().get_terminals();
+            let active_id = controller.usecase().get_active_terminal().map(|t| t.id());
+            let windows: Vec<WindowInfo> = terminals.iter().map(|t| {
+                let cwd = controller.usecase().screen_port().get_cwd(t.id())
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| t.cwd().display().to_string());
+                WindowInfo {
+                    id: t.id().value(),
+                    name: t.name().to_string(),
+                    cwd: Some(cwd),
+                    is_active: active_id == Some(t.id()),
+                    is_running: t.status().is_running(),
+                }
+            }).collect();
+            IpcResponse::OkWithData(IpcResponseData::ListWindows { windows })
+        }
+        IpcCommand::PasteBuffer { target } => {
+            let text = match yank_buffer.as_ref() {
+                Some(t) => t.clone(),
+                None => return IpcResponse::Error("buffer is empty".to_string()),
+            };
+            let tid = TerminalId::new(*target);
+            if controller.usecase().get_terminal_by_id(tid).is_none() {
+                return IpcResponse::Error(format!("terminal not found: {}", target));
+            }
+            // Check bracketed paste mode
+            let bracketed = controller.usecase().screen_port()
+                .get_bracketed_paste(tid)
+                .unwrap_or(false);
+            let mut data = Vec::new();
+            if bracketed {
+                data.extend_from_slice(b"\x1b[200~");
+            }
+            data.extend_from_slice(text.as_bytes());
+            if bracketed {
+                data.extend_from_slice(b"\x1b[201~");
+            }
+            match controller.usecase_mut().pty_port_mut().write(tid, &data) {
+                Ok(()) => IpcResponse::Ok,
+                Err(e) => IpcResponse::Error(format!("write error: {}", e)),
+            }
+        }
+        IpcCommand::SetBuffer { text } => {
+            *yank_buffer = Some(text.clone());
+            IpcResponse::Ok
+        }
+        IpcCommand::ShowBuffer => {
+            IpcResponse::OkWithData(IpcResponseData::Buffer {
+                text: yank_buffer.clone(),
+            })
+        }
+    }
 }
 
 fn handle_key_event<P: PtyPort, S: ScreenPort>(
@@ -1246,6 +1417,27 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                                 let _ = controller.dispatch(AppAction::WriteToActive(data), size);
                             }
                         }
+                    }
+                }
+            }
+        }
+        AppAction::PasteToTarget(target) => {
+            if let Some(ref text) = *yank_buffer {
+                if !text.is_empty() {
+                    let tid = TerminalId::new(target);
+                    if controller.usecase().get_terminal_by_id(tid).is_some() {
+                        let bracketed = controller.usecase().screen_port()
+                            .get_bracketed_paste(tid)
+                            .unwrap_or(false);
+                        let mut data = Vec::new();
+                        if bracketed {
+                            data.extend_from_slice(b"\x1b[200~");
+                        }
+                        data.extend_from_slice(text.as_bytes());
+                        if bracketed {
+                            data.extend_from_slice(b"\x1b[201~");
+                        }
+                        let _ = controller.usecase_mut().pty_port_mut().write(tid, &data);
                     }
                 }
             }
@@ -4141,5 +4333,612 @@ mod tests {
         selection_state = None;
 
         assert!(selection_state.is_none(), "exit_scrollback should clear selection_state");
+    }
+
+    // =========================================================================
+    // handle_ipc_command tests
+    // =========================================================================
+
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use crate::domain::primitive::{NotificationEvent, IpcResponseData};
+    use crate::interface_adapter::port::pty_port::PtyPort;
+    use crate::interface_adapter::port::screen_port::ScreenPort;
+    use crate::usecase::terminal_usecase::TerminalUsecase;
+    use crate::interface_adapter::controller::tui_controller::TuiController;
+    use crate::shared::error::AppError;
+
+    /// Enhanced PtyPort mock that tracks writes.
+    struct TestPtyPort {
+        written: Vec<(TerminalId, Vec<u8>)>,
+    }
+
+    impl TestPtyPort {
+        fn new() -> Self {
+            Self { written: Vec::new() }
+        }
+    }
+
+    impl PtyPort for TestPtyPort {
+        fn spawn(&mut self, _id: TerminalId, _shell: &str, _cwd: &Path, _size: TerminalSize) -> Result<(), AppError> { Ok(()) }
+        fn read(&mut self, id: TerminalId) -> Result<Vec<u8>, AppError> { Err(AppError::TerminalNotFound(id)) }
+        fn write(&mut self, id: TerminalId, data: &[u8]) -> Result<(), AppError> {
+            self.written.push((id, data.to_vec()));
+            Ok(())
+        }
+        fn resize(&mut self, _id: TerminalId, _size: TerminalSize) -> Result<(), AppError> { Ok(()) }
+        fn try_wait(&mut self, _id: TerminalId) -> Result<Option<i32>, AppError> { Ok(None) }
+        fn kill(&mut self, _id: TerminalId) -> Result<(), AppError> { Ok(()) }
+    }
+
+    /// Enhanced ScreenPort mock with configurable cells, cursors, cwds, etc.
+    struct TestScreenPort {
+        cells: HashMap<u32, Vec<Vec<Cell>>>,
+        cursors: HashMap<u32, CursorPos>,
+        cwds: HashMap<u32, Option<String>>,
+        bracketed_paste: HashMap<u32, bool>,
+        max_scrollback: HashMap<u32, usize>,
+    }
+
+    impl TestScreenPort {
+        fn new() -> Self {
+            Self {
+                cells: HashMap::new(),
+                cursors: HashMap::new(),
+                cwds: HashMap::new(),
+                bracketed_paste: HashMap::new(),
+                max_scrollback: HashMap::new(),
+            }
+        }
+    }
+
+    impl ScreenPort for TestScreenPort {
+        fn create(&mut self, id: TerminalId, size: TerminalSize) -> Result<(), AppError> {
+            let rows = size.rows as usize;
+            let cols = size.cols as usize;
+            let grid = vec![vec![Cell::default(); cols]; rows];
+            self.cells.insert(id.value(), grid);
+            Ok(())
+        }
+        fn process(&mut self, _id: TerminalId, _data: &[u8]) -> Result<(), AppError> { Ok(()) }
+        fn get_cells(&self, id: TerminalId) -> Result<&Vec<Vec<Cell>>, AppError> {
+            self.cells.get(&id.value()).ok_or(AppError::ScreenNotFound(id))
+        }
+        fn get_cursor(&self, id: TerminalId) -> Result<CursorPos, AppError> {
+            Ok(self.cursors.get(&id.value()).copied().unwrap_or_default())
+        }
+        fn resize(&mut self, _id: TerminalId, _size: TerminalSize) -> Result<(), AppError> { Ok(()) }
+        fn remove(&mut self, id: TerminalId) -> Result<(), AppError> {
+            self.cells.remove(&id.value());
+            Ok(())
+        }
+        fn get_cursor_visible(&self, _id: TerminalId) -> Result<bool, AppError> { Ok(true) }
+        fn get_application_cursor_keys(&self, _id: TerminalId) -> Result<bool, AppError> { Ok(false) }
+        fn get_bracketed_paste(&self, id: TerminalId) -> Result<bool, AppError> {
+            Ok(self.bracketed_paste.get(&id.value()).copied().unwrap_or(false))
+        }
+        fn get_cwd(&self, id: TerminalId) -> Result<Option<String>, AppError> {
+            Ok(self.cwds.get(&id.value()).cloned().unwrap_or(None))
+        }
+        fn drain_notifications(&mut self, _id: TerminalId) -> Result<Vec<NotificationEvent>, AppError> { Ok(vec![]) }
+        fn set_scrollback_offset(&mut self, _id: TerminalId, _offset: usize) -> Result<(), AppError> { Ok(()) }
+        fn get_scrollback_offset(&self, _id: TerminalId) -> Result<usize, AppError> { Ok(0) }
+        fn get_max_scrollback(&self, id: TerminalId) -> Result<usize, AppError> {
+            Ok(self.max_scrollback.get(&id.value()).copied().unwrap_or(0))
+        }
+        fn is_alternate_screen(&self, _id: TerminalId) -> Result<bool, AppError> { Ok(false) }
+        fn get_cursor_style(&self, _id: TerminalId) -> Result<CursorStyle, AppError> { Ok(CursorStyle::DefaultUserShape) }
+        fn drain_pending_responses(&mut self, _id: TerminalId) -> Result<Vec<Vec<u8>>, AppError> { Ok(vec![]) }
+        fn search_scrollback(&mut self, _id: TerminalId, _query: &str) -> Result<Vec<SearchMatch>, AppError> { Ok(vec![]) }
+        fn get_row_cells(&mut self, id: TerminalId, abs_row: usize) -> Result<Vec<Cell>, AppError> {
+            match self.cells.get(&id.value()) {
+                Some(grid) => {
+                    if abs_row < grid.len() {
+                        Ok(grid[abs_row].clone())
+                    } else {
+                        Err(AppError::ScreenNotFound(id))
+                    }
+                }
+                None => Err(AppError::ScreenNotFound(id)),
+            }
+        }
+    }
+
+    fn make_ipc_controller() -> TuiController<TestPtyPort, TestScreenPort> {
+        let cwd = PathBuf::from("/tmp");
+        let pty = TestPtyPort::new();
+        let screen = TestScreenPort::new();
+        let usecase = TerminalUsecase::new(cwd, pty, screen);
+        TuiController::new(usecase)
+    }
+
+    fn make_ipc_controller_with_terminal() -> (TuiController<TestPtyPort, TestScreenPort>, TerminalId) {
+        let mut controller = make_ipc_controller();
+        let size = TerminalSize::new(80, 24);
+        let id = controller.usecase_mut()
+            .create_terminal(Some("test-term".to_string()), size)
+            .unwrap();
+        (controller, id)
+    }
+
+    /// Set text content in the first row of a terminal's cell grid.
+    fn set_screen_text(controller: &mut TuiController<TestPtyPort, TestScreenPort>, id: TerminalId, text: &str) {
+        let cells = controller.usecase_mut().screen_port_mut().cells
+            .get_mut(&id.value()).unwrap();
+        for (col, ch) in text.chars().enumerate() {
+            if col < cells[0].len() {
+                cells[0][col].ch = ch;
+            }
+        }
+    }
+
+    // =========================================================================
+    // SendKeys tests (#108)
+    // =========================================================================
+
+    #[test]
+    fn ipc_send_keys_writes_to_pty() {
+        let (mut controller, id) = make_ipc_controller_with_terminal();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::SendKeys {
+            target: id.value(),
+            keys: vec!["hello".to_string(), "Enter".to_string()],
+        };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert_eq!(response, IpcResponse::Ok);
+
+        let written = &controller.usecase().pty_port().written;
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].0, id);
+        let mut expected = b"hello".to_vec();
+        expected.push(b'\r');
+        assert_eq!(written[0].1, expected);
+    }
+
+    #[test]
+    fn ipc_send_keys_unknown_terminal_returns_error() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::SendKeys {
+            target: 999,
+            keys: vec!["a".to_string()],
+        };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert!(matches!(response, IpcResponse::Error(ref msg) if msg.contains("terminal not found")));
+    }
+
+    #[test]
+    fn ipc_send_keys_parse_error_returns_error() {
+        let (mut controller, id) = make_ipc_controller_with_terminal();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::SendKeys {
+            target: id.value(),
+            keys: vec!["C-".to_string()],  // Invalid ctrl key
+        };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert!(matches!(response, IpcResponse::Error(ref msg) if msg.contains("key parse error")));
+    }
+
+    #[test]
+    fn ipc_send_keys_empty_keys_returns_ok_without_write() {
+        let (mut controller, id) = make_ipc_controller_with_terminal();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::SendKeys {
+            target: id.value(),
+            keys: vec![],
+        };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert_eq!(response, IpcResponse::Ok);
+
+        let written = &controller.usecase().pty_port().written;
+        assert!(written.is_empty());
+    }
+
+    // =========================================================================
+    // CapturePane tests (#109)
+    // =========================================================================
+
+    #[test]
+    fn ipc_capture_pane_returns_text_and_metadata() {
+        let (mut controller, id) = make_ipc_controller_with_terminal();
+        let mut yank_buffer: Option<String> = None;
+
+        set_screen_text(&mut controller, id, "hello world");
+
+        let cmd = IpcCommand::CapturePane {
+            target: id.value(),
+            include_scrollback: false,
+        };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+
+        if let IpcResponse::OkWithData(IpcResponseData::CapturePane {
+            text,
+            cursor_row,
+            cursor_col,
+            size_rows,
+            size_cols,
+            name,
+            cwd,
+            scrollback_total,
+        }) = &response {
+            assert!(text.starts_with("hello world"));
+            assert_eq!(*cursor_row, 0);
+            assert_eq!(*cursor_col, 0);
+            assert_eq!(*size_rows, 24);
+            assert_eq!(*size_cols, 80);
+            assert_eq!(name, "test-term");
+            // cwd should fallback to the terminal's cwd
+            assert!(cwd.is_some());
+            assert_eq!(*scrollback_total, 0);
+        } else {
+            panic!("Expected OkWithData(CapturePane), got {:?}", response);
+        }
+    }
+
+    #[test]
+    fn ipc_capture_pane_unknown_terminal_returns_error() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::CapturePane {
+            target: 999,
+            include_scrollback: false,
+        };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert!(matches!(response, IpcResponse::Error(ref msg) if msg.contains("terminal not found")));
+    }
+
+    #[test]
+    fn ipc_capture_pane_empty_screen() {
+        let (mut controller, id) = make_ipc_controller_with_terminal();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::CapturePane {
+            target: id.value(),
+            include_scrollback: false,
+        };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+
+        if let IpcResponse::OkWithData(IpcResponseData::CapturePane { text, .. }) = &response {
+            // Empty screen (all spaces) should result in empty text after trimming
+            assert!(text.is_empty());
+        } else {
+            panic!("Expected OkWithData(CapturePane), got {:?}", response);
+        }
+    }
+
+    #[test]
+    fn ipc_capture_pane_with_scrollback_flag() {
+        let (mut controller, id) = make_ipc_controller_with_terminal();
+        let mut yank_buffer: Option<String> = None;
+
+        set_screen_text(&mut controller, id, "visible row");
+
+        let cmd = IpcCommand::CapturePane {
+            target: id.value(),
+            include_scrollback: true,
+        };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+
+        if let IpcResponse::OkWithData(IpcResponseData::CapturePane { text, .. }) = &response {
+            assert!(text.contains("visible row"));
+        } else {
+            panic!("Expected OkWithData(CapturePane), got {:?}", response);
+        }
+    }
+
+    #[test]
+    fn ipc_capture_pane_with_cwd_from_screen() {
+        let (mut controller, id) = make_ipc_controller_with_terminal();
+        let mut yank_buffer: Option<String> = None;
+
+        // Set cwd on the screen port
+        controller.usecase_mut().screen_port_mut().cwds
+            .insert(id.value(), Some("/home/user".to_string()));
+
+        let cmd = IpcCommand::CapturePane {
+            target: id.value(),
+            include_scrollback: false,
+        };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+
+        if let IpcResponse::OkWithData(IpcResponseData::CapturePane { cwd, .. }) = &response {
+            assert_eq!(cwd.as_deref(), Some("/home/user"));
+        } else {
+            panic!("Expected OkWithData(CapturePane), got {:?}", response);
+        }
+    }
+
+    #[test]
+    fn ipc_capture_pane_with_cursor_position() {
+        let (mut controller, id) = make_ipc_controller_with_terminal();
+        let mut yank_buffer: Option<String> = None;
+
+        // Set cursor position
+        controller.usecase_mut().screen_port_mut().cursors
+            .insert(id.value(), CursorPos { row: 5, col: 10 });
+
+        let cmd = IpcCommand::CapturePane {
+            target: id.value(),
+            include_scrollback: false,
+        };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+
+        if let IpcResponse::OkWithData(IpcResponseData::CapturePane { cursor_row, cursor_col, .. }) = &response {
+            assert_eq!(*cursor_row, 5);
+            assert_eq!(*cursor_col, 10);
+        } else {
+            panic!("Expected OkWithData(CapturePane), got {:?}", response);
+        }
+    }
+
+    // =========================================================================
+    // ListWindows tests (#110)
+    // =========================================================================
+
+    #[test]
+    fn ipc_list_windows_empty() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::ListWindows;
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+
+        if let IpcResponse::OkWithData(IpcResponseData::ListWindows { windows }) = &response {
+            assert!(windows.is_empty());
+        } else {
+            panic!("Expected OkWithData(ListWindows), got {:?}", response);
+        }
+    }
+
+    #[test]
+    fn ipc_list_windows_multiple_terminals() {
+        let mut controller = make_ipc_controller();
+        let size = TerminalSize::new(80, 24);
+        let _id1 = controller.usecase_mut()
+            .create_terminal(Some("alpha".to_string()), size).unwrap();
+        let id2 = controller.usecase_mut()
+            .create_terminal(Some("beta".to_string()), size).unwrap();
+
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::ListWindows;
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+
+        if let IpcResponse::OkWithData(IpcResponseData::ListWindows { windows }) = &response {
+            assert_eq!(windows.len(), 2);
+            assert_eq!(windows[0].name, "alpha");
+            assert_eq!(windows[1].name, "beta");
+            // Active should be the last created (beta)
+            assert!(!windows[0].is_active);
+            assert!(windows[1].is_active);
+            // Both should be running
+            assert!(windows[0].is_running);
+            assert!(windows[1].is_running);
+        } else {
+            panic!("Expected OkWithData(ListWindows), got {:?}", response);
+        }
+    }
+
+    #[test]
+    fn ipc_list_windows_with_active_flag() {
+        let mut controller = make_ipc_controller();
+        let size = TerminalSize::new(80, 24);
+        let _id1 = controller.usecase_mut()
+            .create_terminal(Some("first".to_string()), size).unwrap();
+        let _id2 = controller.usecase_mut()
+            .create_terminal(Some("second".to_string()), size).unwrap();
+
+        // Select first terminal
+        controller.usecase_mut().select_by_index(0);
+
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::ListWindows;
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+
+        if let IpcResponse::OkWithData(IpcResponseData::ListWindows { windows }) = &response {
+            assert!(windows[0].is_active);
+            assert!(!windows[1].is_active);
+        } else {
+            panic!("Expected OkWithData(ListWindows), got {:?}", response);
+        }
+    }
+
+    #[test]
+    fn ipc_list_windows_has_cwd() {
+        let mut controller = make_ipc_controller();
+        let size = TerminalSize::new(80, 24);
+        let id = controller.usecase_mut()
+            .create_terminal(Some("t1".to_string()), size).unwrap();
+
+        // Set dynamic cwd via screen port
+        controller.usecase_mut().screen_port_mut().cwds
+            .insert(id.value(), Some("/home/test".to_string()));
+
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::ListWindows;
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+
+        if let IpcResponse::OkWithData(IpcResponseData::ListWindows { windows }) = &response {
+            assert_eq!(windows[0].cwd.as_deref(), Some("/home/test"));
+        } else {
+            panic!("Expected OkWithData(ListWindows), got {:?}", response);
+        }
+    }
+
+    #[test]
+    fn ipc_list_windows_cwd_falls_back_to_terminal_cwd() {
+        let mut controller = make_ipc_controller();
+        let size = TerminalSize::new(80, 24);
+        let _id = controller.usecase_mut()
+            .create_terminal(Some("t1".to_string()), size).unwrap();
+
+        // No dynamic cwd set -- should fall back to terminal's cwd (/tmp)
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::ListWindows;
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+
+        if let IpcResponse::OkWithData(IpcResponseData::ListWindows { windows }) = &response {
+            assert_eq!(windows[0].cwd.as_deref(), Some("/tmp"));
+        } else {
+            panic!("Expected OkWithData(ListWindows), got {:?}", response);
+        }
+    }
+
+    // =========================================================================
+    // PasteBuffer tests (#111)
+    // =========================================================================
+
+    #[test]
+    fn ipc_paste_buffer_writes_text_to_pty() {
+        let (mut controller, id) = make_ipc_controller_with_terminal();
+        let mut yank_buffer: Option<String> = Some("pasted text".to_string());
+        let cmd = IpcCommand::PasteBuffer { target: id.value() };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert_eq!(response, IpcResponse::Ok);
+
+        let written = &controller.usecase().pty_port().written;
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].1, b"pasted text");
+    }
+
+    #[test]
+    fn ipc_paste_buffer_empty_buffer_returns_error() {
+        let (mut controller, id) = make_ipc_controller_with_terminal();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::PasteBuffer { target: id.value() };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert!(matches!(response, IpcResponse::Error(ref msg) if msg.contains("buffer is empty")));
+    }
+
+    #[test]
+    fn ipc_paste_buffer_unknown_terminal_returns_error() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = Some("text".to_string());
+        let cmd = IpcCommand::PasteBuffer { target: 999 };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert!(matches!(response, IpcResponse::Error(ref msg) if msg.contains("terminal not found")));
+    }
+
+    #[test]
+    fn ipc_paste_buffer_with_bracketed_paste() {
+        let (mut controller, id) = make_ipc_controller_with_terminal();
+        // Enable bracketed paste for this terminal
+        controller.usecase_mut().screen_port_mut().bracketed_paste
+            .insert(id.value(), true);
+
+        let mut yank_buffer: Option<String> = Some("data".to_string());
+        let cmd = IpcCommand::PasteBuffer { target: id.value() };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert_eq!(response, IpcResponse::Ok);
+
+        let written = &controller.usecase().pty_port().written;
+        assert_eq!(written.len(), 1);
+        // Should be wrapped: ESC[200~ + data + ESC[201~
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"\x1b[200~");
+        expected.extend_from_slice(b"data");
+        expected.extend_from_slice(b"\x1b[201~");
+        assert_eq!(written[0].1, expected);
+    }
+
+    #[test]
+    fn ipc_paste_buffer_without_bracketed_paste() {
+        let (mut controller, id) = make_ipc_controller_with_terminal();
+        // Bracketed paste defaults to false
+        let mut yank_buffer: Option<String> = Some("raw".to_string());
+        let cmd = IpcCommand::PasteBuffer { target: id.value() };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert_eq!(response, IpcResponse::Ok);
+
+        let written = &controller.usecase().pty_port().written;
+        assert_eq!(written[0].1, b"raw");
+    }
+
+    // =========================================================================
+    // SetBuffer + ShowBuffer tests (#111)
+    // =========================================================================
+
+    #[test]
+    fn ipc_set_buffer_stores_text() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::SetBuffer { text: "hello world".to_string() };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert_eq!(response, IpcResponse::Ok);
+        assert_eq!(yank_buffer.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn ipc_set_buffer_empty_text() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::SetBuffer { text: String::new() };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert_eq!(response, IpcResponse::Ok);
+        assert_eq!(yank_buffer.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn ipc_set_buffer_overwrites_existing() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = Some("old".to_string());
+        let cmd = IpcCommand::SetBuffer { text: "new".to_string() };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert_eq!(response, IpcResponse::Ok);
+        assert_eq!(yank_buffer.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn ipc_show_buffer_returns_text() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = Some("stored text".to_string());
+        let cmd = IpcCommand::ShowBuffer;
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+
+        if let IpcResponse::OkWithData(IpcResponseData::Buffer { text }) = &response {
+            assert_eq!(text.as_deref(), Some("stored text"));
+        } else {
+            panic!("Expected OkWithData(Buffer), got {:?}", response);
+        }
+    }
+
+    #[test]
+    fn ipc_show_buffer_empty_returns_none() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::ShowBuffer;
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+
+        if let IpcResponse::OkWithData(IpcResponseData::Buffer { text }) = &response {
+            assert!(text.is_none());
+        } else {
+            panic!("Expected OkWithData(Buffer), got {:?}", response);
+        }
+    }
+
+    #[test]
+    fn ipc_set_then_show_buffer_roundtrip() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+
+        // Set
+        let cmd = IpcCommand::SetBuffer { text: "roundtrip".to_string() };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert_eq!(response, IpcResponse::Ok);
+
+        // Show
+        let cmd = IpcCommand::ShowBuffer;
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        if let IpcResponse::OkWithData(IpcResponseData::Buffer { text }) = &response {
+            assert_eq!(text.as_deref(), Some("roundtrip"));
+        } else {
+            panic!("Expected OkWithData(Buffer), got {:?}", response);
+        }
+    }
+
+    #[test]
+    fn ipc_show_buffer_does_not_modify_yank_buffer() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = Some("existing".to_string());
+        let cmd = IpcCommand::ShowBuffer;
+        let _ = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        assert_eq!(yank_buffer.as_deref(), Some("existing"));
     }
 }
