@@ -92,6 +92,8 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
             ("[", "Scrollback mode"),
             ("\u{2191}/k", "Scroll up"),
             ("\u{2193}/j", "Scroll down"),
+            ("h/l", "Cursor left/right"),
+            ("0/$", "Line start/end"),
             ("PgUp", "Page up"),
             ("PgDn", "Page down"),
             ("g", "Go to top"),
@@ -477,6 +479,26 @@ mod tests {
         assert!(
             content.contains("Paste to #N"),
             "Expected 'Paste to #N' keybinding in GENERAL section"
+        );
+    }
+
+    #[test]
+    fn help_overlay_renders_cursor_left_right_keybinding() {
+        let buf = render_help(80, 32);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("Cursor left/right"),
+            "Expected 'Cursor left/right' keybinding in SCROLLBACK category"
+        );
+    }
+
+    #[test]
+    fn help_overlay_renders_line_start_end_keybinding() {
+        let buf = render_help(80, 32);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("Line start/end"),
+            "Expected 'Line start/end' keybinding in SCROLLBACK category"
         );
     }
 }

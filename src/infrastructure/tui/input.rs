@@ -131,6 +131,10 @@ impl InputHandler {
             }
             KeyCode::Up | KeyCode::Char('k') => Some(AppAction::ScrollbackUp(1)),
             KeyCode::Down | KeyCode::Char('j') => Some(AppAction::ScrollbackDown(1)),
+            KeyCode::Left | KeyCode::Char('h') => Some(AppAction::ScrollbackCursorLeft),
+            KeyCode::Right | KeyCode::Char('l') => Some(AppAction::ScrollbackCursorRight),
+            KeyCode::Char('0') if key.modifiers.is_empty() => Some(AppAction::ScrollbackCursorLineStart),
+            KeyCode::Char('$') => Some(AppAction::ScrollbackCursorLineEnd),
             KeyCode::PageUp => Some(AppAction::ScrollbackPageUp),
             KeyCode::PageDown => Some(AppAction::ScrollbackPageDown),
             KeyCode::Char('g') => Some(AppAction::ScrollbackTop),
@@ -1897,5 +1901,106 @@ mod tests {
         assert_normal(&handler);
         // pending_target should be reset
         assert!(handler.pending_target.is_none(), "pending_target should be None after timeout");
+    }
+
+    // =========================================================================
+    // Tests: Scrollback horizontal cursor movement keybindings (Task #116)
+    // =========================================================================
+
+    #[test]
+    fn scrollback_h_key_produces_cursor_left() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+        let action = handler.handle_key(make_key(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert!(
+            matches!(action, Some(AppAction::ScrollbackCursorLeft)),
+            "h in scrollback should produce ScrollbackCursorLeft"
+        );
+    }
+
+    #[test]
+    fn scrollback_left_arrow_produces_cursor_left() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+        let action = handler.handle_key(make_key(KeyCode::Left, KeyModifiers::NONE));
+        assert!(
+            matches!(action, Some(AppAction::ScrollbackCursorLeft)),
+            "Left arrow in scrollback should produce ScrollbackCursorLeft"
+        );
+    }
+
+    #[test]
+    fn scrollback_l_key_produces_cursor_right() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+        let action = handler.handle_key(make_key(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert!(
+            matches!(action, Some(AppAction::ScrollbackCursorRight)),
+            "l in scrollback should produce ScrollbackCursorRight"
+        );
+    }
+
+    #[test]
+    fn scrollback_right_arrow_produces_cursor_right() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+        let action = handler.handle_key(make_key(KeyCode::Right, KeyModifiers::NONE));
+        assert!(
+            matches!(action, Some(AppAction::ScrollbackCursorRight)),
+            "Right arrow in scrollback should produce ScrollbackCursorRight"
+        );
+    }
+
+    #[test]
+    fn scrollback_zero_without_modifiers_produces_cursor_line_start() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+        let action = handler.handle_key(make_key(KeyCode::Char('0'), KeyModifiers::NONE));
+        assert!(
+            matches!(action, Some(AppAction::ScrollbackCursorLineStart)),
+            "0 in scrollback (no modifier) should produce ScrollbackCursorLineStart"
+        );
+    }
+
+    #[test]
+    fn scrollback_dollar_produces_cursor_line_end() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+        let action = handler.handle_key(make_key(KeyCode::Char('$'), KeyModifiers::NONE));
+        assert!(
+            matches!(action, Some(AppAction::ScrollbackCursorLineEnd)),
+            "$ in scrollback should produce ScrollbackCursorLineEnd"
+        );
+    }
+
+    #[test]
+    fn scrollback_dollar_with_shift_produces_cursor_line_end() {
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+        let action = handler.handle_key(make_key(KeyCode::Char('$'), KeyModifiers::SHIFT));
+        assert!(
+            matches!(action, Some(AppAction::ScrollbackCursorLineEnd)),
+            "$ (SHIFT) in scrollback should produce ScrollbackCursorLineEnd"
+        );
+    }
+
+    #[test]
+    fn scrollback_existing_keys_still_work_after_cursor_additions() {
+        // Verify that existing keys are not broken by adding cursor movement keys
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+
+        let action = handler.handle_key(make_key(KeyCode::Up, KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ScrollbackUp(1))), "Up should still work");
+
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+        let action = handler.handle_key(make_key(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ScrollbackDown(1))), "Down should still work");
+
+        let mut handler = InputHandler::new();
+        enter_scrollback(&mut handler);
+        let action = handler.handle_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert!(matches!(action, Some(AppAction::ScrollbackTop)), "g should still work");
     }
 }

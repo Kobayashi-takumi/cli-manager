@@ -44,6 +44,10 @@ pub enum AppAction {
     PasteToTarget(u32),
     EnterVisualChar,
     EnterVisualLine,
+    ScrollbackCursorLeft,
+    ScrollbackCursorRight,
+    ScrollbackCursorLineStart,
+    ScrollbackCursorLineEnd,
 }
 
 /// Thin controller that translates `AppAction`s into usecase calls.
@@ -122,6 +126,10 @@ impl<P: PtyPort, S: ScreenPort> TuiController<P, S> {
             | AppAction::PasteToTarget(_)
             | AppAction::EnterVisualChar
             | AppAction::EnterVisualLine => {} // Handled by caller (app_runner)
+            AppAction::ScrollbackCursorLeft
+            | AppAction::ScrollbackCursorRight
+            | AppAction::ScrollbackCursorLineStart
+            | AppAction::ScrollbackCursorLineEnd => {} // Handled by caller (app_runner)
         }
         Ok(())
     }
@@ -1137,6 +1145,82 @@ mod tests {
         let size = default_size();
         let result = ctrl.dispatch(AppAction::PasteToTarget(2), size);
         assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // Tests: dispatch(scrollback cursor actions) - Task #115
+    // =========================================================================
+
+    #[test]
+    fn dispatch_scrollback_cursor_left_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::ScrollbackCursorLeft, size);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_scrollback_cursor_right_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::ScrollbackCursorRight, size);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_scrollback_cursor_line_start_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::ScrollbackCursorLineStart, size);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_scrollback_cursor_line_end_is_noop() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        let result = ctrl.dispatch(AppAction::ScrollbackCursorLineEnd, size);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_scrollback_cursor_left_does_not_affect_terminal_state() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        ctrl.dispatch(AppAction::CreateTerminal { name: None }, size).unwrap();
+        let result = ctrl.dispatch(AppAction::ScrollbackCursorLeft, size);
+        assert!(result.is_ok());
+        assert_eq!(ctrl.usecase().get_terminals().len(), 1);
+    }
+
+    #[test]
+    fn dispatch_scrollback_cursor_right_does_not_affect_terminal_state() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        ctrl.dispatch(AppAction::CreateTerminal { name: None }, size).unwrap();
+        let result = ctrl.dispatch(AppAction::ScrollbackCursorRight, size);
+        assert!(result.is_ok());
+        assert_eq!(ctrl.usecase().get_terminals().len(), 1);
+    }
+
+    #[test]
+    fn dispatch_scrollback_cursor_line_start_does_not_affect_terminal_state() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        ctrl.dispatch(AppAction::CreateTerminal { name: None }, size).unwrap();
+        let result = ctrl.dispatch(AppAction::ScrollbackCursorLineStart, size);
+        assert!(result.is_ok());
+        assert_eq!(ctrl.usecase().get_terminals().len(), 1);
+    }
+
+    #[test]
+    fn dispatch_scrollback_cursor_line_end_does_not_affect_terminal_state() {
+        let mut ctrl = make_controller();
+        let size = default_size();
+        ctrl.dispatch(AppAction::CreateTerminal { name: None }, size).unwrap();
+        let result = ctrl.dispatch(AppAction::ScrollbackCursorLineEnd, size);
+        assert!(result.is_ok());
+        assert_eq!(ctrl.usecase().get_terminals().len(), 1);
     }
 
 }

@@ -248,6 +248,16 @@ fn extract_text_from_cells(
     lines.join("\n")
 }
 
+/// Tracks the cursor position within the scrollback buffer.
+///
+/// `row` is the absolute row index (0 = top of scrollback buffer, i.e. oldest line).
+/// `col` is the column cell index.
+#[derive(Debug, Clone, Copy, Default)]
+struct ScrollbackCursor {
+    row: usize,
+    col: usize,
+}
+
 /// Main TUI event loop.
 ///
 /// Initializes crossterm raw mode + alternate screen, creates the ratatui Terminal,
@@ -312,6 +322,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
     let mut yank_buffer: Option<String> = None;
     let mut yank_flash_until: Option<std::time::Instant> = None;
     let mut selection_state: Option<SelectionState> = None;
+    let mut scrollback_cursor = ScrollbackCursor::default();
 
     while !*should_quit {
         // 1. Compute status message before draw (flash expires after 2 seconds)
@@ -509,6 +520,35 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                 (None, None)
             };
 
+            // Build scrollback cursor highlight for main terminal
+            // (only shown when in scrollback mode, no visual selection active, no search active)
+            let main_scrollback_cursor_hl = if main_in_scrollback && main_sel_hl.is_none() && search_state.as_ref().map_or(true, |ss| !ss.confirmed) {
+                if let Some(t) = controller.usecase().get_active_terminal() {
+                    let id = t.id();
+                    let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                    let offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                    let visible_start = max_sb.saturating_sub(offset);
+                    let content_rows = if areas.main_pane.height >= 5 {
+                        (areas.main_pane.height - 4) as usize
+                    } else {
+                        areas.main_pane.height.saturating_sub(1) as usize
+                    };
+                    let visible_end = visible_start + content_rows;
+                    if scrollback_cursor.row >= visible_start && scrollback_cursor.row < visible_end {
+                        Some(terminal_view::ScrollbackCursorHighlight {
+                            display_row: scrollback_cursor.row - visible_start,
+                            col: scrollback_cursor.col,
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             terminal_view::render(
                 frame,
                 terminal_area,
@@ -523,6 +563,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                 if main_in_scrollback { status_msg } else { None },
                 main_sel_hl.as_ref(),
                 main_visual_label,
+                main_scrollback_cursor_hl.as_ref(),
             );
 
             // Render search bar if active
@@ -613,6 +654,25 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                     } else {
                         None
                     };
+                    // Build scrollback cursor highlight for mini terminal
+                    let mini_scrollback_cursor_hl = if mini_in_scrollback && mini_sel_hl.is_none() {
+                        let max_sb = controller.usecase().screen_port().get_max_scrollback(mid).unwrap_or(0);
+                        let offset = controller.usecase().screen_port().get_scrollback_offset(mid).unwrap_or(0);
+                        let visible_start = max_sb.saturating_sub(offset);
+                        let content_rows = (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4);
+                        let visible_end = visible_start + content_rows;
+                        if scrollback_cursor.row >= visible_start && scrollback_cursor.row < visible_end {
+                            Some(terminal_view::ScrollbackCursorHighlight {
+                                display_row: scrollback_cursor.row - visible_start,
+                                col: scrollback_cursor.col,
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
                     mini_terminal_view::render(
                         frame,
                         mini_area,
@@ -625,6 +685,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                         if mini_in_scrollback { status_msg } else { None },
                         mini_sel_hl.as_ref(),
                         mini_visual_label,
+                        mini_scrollback_cursor_hl.as_ref(),
                     );
                 } else {
                     mini_terminal_view::render(
@@ -636,6 +697,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                         *focus == FocusPane::MiniTerminal,
                         None,
                         false,
+                        None,
                         None,
                         None,
                         None,
@@ -876,7 +938,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
             let ev = event::read()?;
             match ev {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    handle_key_event(key, controller, input_handler, should_quit, dialog, focus, size, scrollback_target, &mut mini_terminal, search_state, &mut yank_buffer, &mut yank_flash_until, &mut selection_state)?;
+                    handle_key_event(key, controller, input_handler, should_quit, dialog, focus, size, scrollback_target, &mut mini_terminal, search_state, &mut yank_buffer, &mut yank_flash_until, &mut selection_state, &mut scrollback_cursor)?;
                 }
                 Event::Resize(cols, rows) => {
                     let new_full = Rect::new(0, 0, cols, rows);
@@ -1128,6 +1190,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
     yank_buffer: &mut Option<String>,
     yank_flash_until: &mut Option<std::time::Instant>,
     selection_state: &mut Option<SelectionState>,
+    scrollback_cursor: &mut ScrollbackCursor,
 ) -> anyhow::Result<()> {
     // If in ScrollbackSearch mode, handle search bar input directly
     if matches!(input_handler.mode(), InputMode::ScrollbackSearch) {
@@ -1185,7 +1248,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
 
     match action {
         AppAction::CreateTerminal { .. } => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state, scrollback_cursor);
             *dialog = DialogState::CreateTerminal {
                 input: String::new(),
                 cursor_pos: 0,
@@ -1193,7 +1256,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             input_handler.set_mode(InputMode::DialogInput);
         }
         AppAction::CloseTerminal => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state, scrollback_cursor);
             // Check if the active terminal is running
             if let Some(terminal) = controller.usecase().get_active_terminal() {
                 if terminal.status().is_running() {
@@ -1212,7 +1275,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             *should_quit = true;
         }
         AppAction::ToggleFocus => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state, scrollback_cursor);
             *focus = match *focus {
                 FocusPane::Sidebar => FocusPane::Terminal,
                 FocusPane::Terminal => FocusPane::Sidebar,
@@ -1220,7 +1283,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             };
         }
         AppAction::SelectNext | AppAction::SelectPrev | AppAction::SelectByIndex(_) => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state, scrollback_cursor);
             if *focus == FocusPane::MiniTerminal {
                 *focus = FocusPane::Terminal;
                 input_handler.set_mode(InputMode::Normal);
@@ -1239,20 +1302,30 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                 // Enter scrollback for mini terminal
                 let mid = mini_terminal.terminal_id;
                 let is_alt = controller.usecase().screen_port().is_alternate_screen(mid).unwrap_or(false);
-                let max = controller.usecase().screen_port().get_max_scrollback(mid).unwrap_or(0);
-                if !is_alt && max > 0 {
+                if !is_alt {
                     *scrollback_target = Some(ScrollbackTarget::MiniTerminal);
                     input_handler.set_mode(InputMode::ScrollbackMode);
+                    // Initialize cursor at top of visible area
+                    let offset = controller.usecase().screen_port().get_scrollback_offset(mid).unwrap_or(0);
+                    let max_sb = controller.usecase().screen_port().get_max_scrollback(mid).unwrap_or(0);
+                    let visible_start = max_sb.saturating_sub(offset);
+                    scrollback_cursor.row = visible_start;
+                    scrollback_cursor.col = 0;
                 }
             } else {
-                // Check if we can enter scrollback (not in alternate screen, has history)
+                // Enter scrollback unless in alternate screen (e.g. vim, full-screen TUI)
                 if let Some(t) = controller.usecase().get_active_terminal() {
                     let id = t.id();
                     let is_alt = controller.usecase().screen_port().is_alternate_screen(id).unwrap_or(false);
-                    let max = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
-                    if !is_alt && max > 0 {
+                    if !is_alt {
                         *scrollback_target = Some(ScrollbackTarget::MainTerminal);
                         input_handler.set_mode(InputMode::ScrollbackMode);
+                        // Initialize cursor at top of visible area
+                        let offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                        let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                        let visible_start = max_sb.saturating_sub(offset);
+                        scrollback_cursor.row = visible_start;
+                        scrollback_cursor.col = 0;
                     }
                 }
             }
@@ -1264,7 +1337,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                 // handle_scrollback() already set mode to Normal, restore ScrollbackMode
                 input_handler.set_mode(InputMode::ScrollbackMode);
             } else {
-                exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
+                exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state, scrollback_cursor);
             }
         }
         AppAction::EnterScrollbackSearch => {
@@ -1302,62 +1375,131 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
         }
         AppAction::ScrollbackUp(n) => {
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
-                let current = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
-                let max = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
-                let new_offset = (current + n).min(max);
-                let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset);
+                let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                    (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
+                } else {
+                    size.rows as usize
+                };
+                // Move cursor up (clamped to row 0)
+                scrollback_cursor.row = scrollback_cursor.row.saturating_sub(n);
+                // Auto-scroll: if cursor is above visible window, scroll viewport up
+                let current_offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                let visible_start = max_sb.saturating_sub(current_offset);
+                let new_offset = if scrollback_cursor.row < visible_start {
+                    max_sb.saturating_sub(scrollback_cursor.row)
+                } else {
+                    current_offset
+                };
+                let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset.min(max_sb));
+                let _ = screen_rows; // suppress unused warning
             }
         }
         AppAction::ScrollbackDown(n) => {
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
-                let current = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
-                let new_offset = current.saturating_sub(n);
+                let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                    (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
+                } else {
+                    size.rows as usize
+                };
+                let total_rows = max_sb + screen_rows;
+                // Move cursor down (clamped to last row)
+                scrollback_cursor.row = (scrollback_cursor.row + n).min(total_rows.saturating_sub(1));
+                // Auto-scroll: if cursor is below visible window, scroll viewport down
+                let current_offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                let visible_start = max_sb.saturating_sub(current_offset);
+                let visible_end = visible_start + screen_rows;
+                let new_offset = if scrollback_cursor.row >= visible_end {
+                    let new_visible_start = scrollback_cursor.row.saturating_sub(screen_rows.saturating_sub(1));
+                    max_sb.saturating_sub(new_visible_start)
+                } else {
+                    current_offset
+                };
                 let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset);
-                if new_offset == 0 {
-                    // Auto-exit scrollback when reaching bottom
-                    exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
-                }
+                // No auto-exit: user must press Esc/q to leave scrollback
             }
         }
         AppAction::ScrollbackPageUp => {
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
-                let current = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
-                let max = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                    (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
+                } else {
+                    size.rows as usize
+                };
                 let page = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
                     (MINI_TERMINAL_HEIGHT as usize).saturating_sub(2) / 2
                 } else {
                     (size.rows as usize) / 2
                 };
-                let new_offset = (current + page).min(max);
-                let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset);
+                // Move cursor up by page
+                scrollback_cursor.row = scrollback_cursor.row.saturating_sub(page);
+                // Auto-scroll
+                let current_offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                let visible_start = max_sb.saturating_sub(current_offset);
+                let new_offset = if scrollback_cursor.row < visible_start {
+                    max_sb.saturating_sub(scrollback_cursor.row)
+                } else {
+                    current_offset
+                };
+                let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset.min(max_sb));
+                let _ = screen_rows; // suppress unused warning
             }
         }
         AppAction::ScrollbackPageDown => {
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
-                let current = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                    (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
+                } else {
+                    size.rows as usize
+                };
+                let total_rows = max_sb + screen_rows;
                 let page = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
                     (MINI_TERMINAL_HEIGHT as usize).saturating_sub(2) / 2
                 } else {
                     (size.rows as usize) / 2
                 };
-                let new_offset = current.saturating_sub(page);
+                // Move cursor down by page (clamped to last row)
+                scrollback_cursor.row = (scrollback_cursor.row + page).min(total_rows.saturating_sub(1));
+                // Auto-scroll
+                let current_offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                let visible_start = max_sb.saturating_sub(current_offset);
+                let visible_end = visible_start + screen_rows;
+                let new_offset = if scrollback_cursor.row >= visible_end {
+                    let new_visible_start = scrollback_cursor.row.saturating_sub(screen_rows.saturating_sub(1));
+                    max_sb.saturating_sub(new_visible_start)
+                } else {
+                    current_offset
+                };
                 let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, new_offset);
-                if new_offset == 0 {
-                    exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
-                }
+                // No auto-exit: user must press Esc/q to leave scrollback
             }
         }
         AppAction::ScrollbackTop => {
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
-                let max = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
-                let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, max);
+                let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                // Move cursor to top of buffer
+                scrollback_cursor.row = 0;
+                scrollback_cursor.col = 0;
+                let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, max_sb);
             }
         }
         AppAction::ScrollbackBottom => {
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
+                let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                    (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
+                } else {
+                    size.rows as usize
+                };
+                let total_rows = max_sb + screen_rows;
+                // Move cursor to last row of buffer
+                scrollback_cursor.row = total_rows.saturating_sub(1);
                 let _ = controller.usecase_mut().screen_port_mut().set_scrollback_offset(id, 0);
+                // No auto-exit: user must press Esc/q to leave scrollback
             }
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
         }
         AppAction::YankAllVisible => {
             if scrollback_target.is_some() {
@@ -1375,13 +1517,16 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
         AppAction::YankLine => {
             if scrollback_target.is_some() {
                 if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
-                    if let Ok(cells) = controller.usecase().screen_port().get_cells(id) {
-                        let text = extract_text_from_cells(cells, 0, 1, None, None);
+                    if let Ok(row_cells) = controller.usecase_mut().screen_port_mut()
+                        .get_row_cells(id, scrollback_cursor.row)
+                    {
+                        let text = extract_text_from_cells(&[row_cells], 0, 1, None, None);
                         if !text.is_empty() {
                             *yank_buffer = Some(text);
                             *yank_flash_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                         }
                     }
+                    // Keep scrollback mode active after yank
                 }
             }
         }
@@ -1444,18 +1589,14 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
         }
         AppAction::EnterVisualChar | AppAction::EnterVisualLine => {
             if scrollback_target.is_some() {
-                if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
-                    let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
-                    let offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
-                    let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
-                        (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4) // borders + title
+                if active_scrollback_id(scrollback_target, controller, mini_terminal).is_some() {
+                    // Initial cursor position taken from the scrollback_cursor (Task #120)
+                    let initial_pos = if matches!(action, AppAction::EnterVisualChar) {
+                        SelectionPos { row: scrollback_cursor.row, col: scrollback_cursor.col }
                     } else {
-                        size.rows as usize
+                        // Line mode: start at cursor row, col 0
+                        SelectionPos { row: scrollback_cursor.row, col: 0 }
                     };
-                    // Initial cursor at center of visible area
-                    let visible_start = max_sb.saturating_sub(offset);
-                    let initial_row = visible_start + screen_rows / 2;
-                    let initial_pos = SelectionPos { row: initial_row, col: 0 };
                     let mode = if matches!(action, AppAction::EnterVisualChar) {
                         SelectionMode::Character
                     } else {
@@ -1467,7 +1608,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             }
         }
         AppAction::RenameTerminal { .. } => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state, scrollback_cursor);
             if let Some(terminal) = controller.usecase().get_active_terminal() {
                 let current_name = terminal.name().to_string();
                 let cursor_pos = current_name.chars().count();
@@ -1479,7 +1620,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             }
         }
         AppAction::OpenMemo => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state, scrollback_cursor);
             if let Ok(memo) = controller.usecase().get_active_memo() {
                 let text = memo.to_string();
                 let lines: Vec<&str> = text.split('\n').collect();
@@ -1494,12 +1635,12 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             }
         }
         AppAction::ShowHelp => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state, scrollback_cursor);
             *dialog = DialogState::Help;
             input_handler.set_mode(InputMode::HelpView);
         }
         AppAction::ToggleMiniTerminal => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state, scrollback_cursor);
             if !mini_terminal.spawned {
                 // First time: spawn PTY + Screen
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
@@ -1541,8 +1682,77 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                 let _ = controller.usecase_mut().pty_port_mut().write(mid, &data);
             }
         }
+        AppAction::ScrollbackCursorLeft => {
+            // Wrap: col=0 on any row > 0 → move to end of previous row
+            if scrollback_cursor.col == 0 && scrollback_cursor.row > 0 {
+                scrollback_cursor.row -= 1;
+                // Move to end of the previous row; auto-scroll if needed
+                if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
+                    let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                    let offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                    let visible_start = max_sb.saturating_sub(offset);
+                    let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                        (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
+                    } else {
+                        size.rows as usize
+                    };
+                    // Scrollback border takes 2 cols (left+right), so visible cols = size.cols - 2
+                    let visible_cols = (size.cols as usize).saturating_sub(2);
+                    scrollback_cursor.col = visible_cols.saturating_sub(1);
+                    // Auto-scroll up if cursor moved above visible area
+                    if scrollback_cursor.row < visible_start {
+                        let new_offset = max_sb.saturating_sub(scrollback_cursor.row);
+                        let _ = controller.usecase_mut().screen_port_mut()
+                            .set_scrollback_offset(id, new_offset.min(max_sb));
+                    }
+                    let _ = screen_rows; // used implicitly via visible_start calc
+                }
+            } else {
+                scrollback_cursor.col = scrollback_cursor.col.saturating_sub(1);
+            }
+        }
+        AppAction::ScrollbackCursorRight => {
+            if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
+                let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
+                let offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
+                let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+                    (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
+                } else {
+                    size.rows as usize
+                };
+                let total_rows = max_sb + screen_rows;
+                // Scrollback border takes 2 cols (left+right), so visible cols = size.cols - 2
+                let visible_cols = (size.cols as usize).saturating_sub(2);
+                let max_col = visible_cols.saturating_sub(1);
+                if scrollback_cursor.col >= max_col && scrollback_cursor.row + 1 < total_rows {
+                    // Wrap to beginning of next row
+                    scrollback_cursor.col = 0;
+                    scrollback_cursor.row += 1;
+                    // Auto-scroll down if cursor moved below visible area
+                    let visible_start = max_sb.saturating_sub(offset);
+                    let visible_end = visible_start + screen_rows;
+                    if scrollback_cursor.row >= visible_end {
+                        let new_offset = max_sb.saturating_sub(
+                            scrollback_cursor.row.saturating_sub(screen_rows - 1)
+                        );
+                        let _ = controller.usecase_mut().screen_port_mut()
+                            .set_scrollback_offset(id, new_offset);
+                    }
+                } else {
+                    scrollback_cursor.col = (scrollback_cursor.col + 1).min(max_col);
+                }
+            }
+        }
+        AppAction::ScrollbackCursorLineStart => {
+            scrollback_cursor.col = 0;
+        }
+        AppAction::ScrollbackCursorLineEnd => {
+            // Scrollback border takes 2 cols (left+right)
+            let visible_cols = (size.cols as usize).saturating_sub(2);
+            scrollback_cursor.col = visible_cols.saturating_sub(1);
+        }
         AppAction::OpenQuickSwitcher => {
-            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state);
+            exit_scrollback_if_active(controller, input_handler, scrollback_target, mini_terminal, search_state, selection_state, scrollback_cursor);
             *dialog = DialogState::QuickSwitch {
                 query: String::new(),
                 cursor_pos: 0,
@@ -1574,9 +1784,11 @@ fn exit_scrollback_if_active<P: PtyPort, S: ScreenPort>(
     mini_terminal: &MiniTerminalState,
     search_state: &mut Option<SearchState>,
     selection_state: &mut Option<SelectionState>,
+    scrollback_cursor: &mut ScrollbackCursor,
 ) {
     *search_state = None; // Clear search on exit
     *selection_state = None; // Clear selection on exit
+    *scrollback_cursor = ScrollbackCursor::default(); // Reset cursor on exit
     if let Some(target) = *scrollback_target {
         match target {
             ScrollbackTarget::MainTerminal => {
@@ -1625,15 +1837,15 @@ fn handle_visual_key<P: PtyPort, S: ScreenPort>(
     // Total rows = max_scrollback + screen_rows
     let total_rows = max_sb + screen_rows;
     // Get number of columns from cells
-    let num_cols = controller.usecase().screen_port().get_cells(id)
-        .map(|cells| cells.first().map_or(0, |row| row.len()))
-        .unwrap_or(0);
+    // Scrollback border uses Borders::ALL, so left+right borders consume 2 columns.
+    // Visible content width = size.cols - 2. Use this as the column bound.
+    let num_cols = (size.cols as usize).saturating_sub(2);
 
     match key.code {
-        KeyCode::Char('h') | KeyCode::Left => {
+        KeyCode::Char('h') | KeyCode::Left if sel.mode == SelectionMode::Character => {
             sel.cursor.col = sel.cursor.col.saturating_sub(1);
         }
-        KeyCode::Char('l') | KeyCode::Right => {
+        KeyCode::Char('l') | KeyCode::Right if sel.mode == SelectionMode::Character => {
             sel.cursor.col = (sel.cursor.col + 1).min(num_cols.saturating_sub(1));
         }
         KeyCode::Char('j') | KeyCode::Down => {
@@ -1642,10 +1854,10 @@ fn handle_visual_key<P: PtyPort, S: ScreenPort>(
         KeyCode::Char('k') | KeyCode::Up => {
             sel.cursor.row = sel.cursor.row.saturating_sub(1);
         }
-        KeyCode::Char('0') => {
+        KeyCode::Char('0') if sel.mode == SelectionMode::Character => {
             sel.cursor.col = 0;
         }
-        KeyCode::Char('$') => {
+        KeyCode::Char('$') if sel.mode == SelectionMode::Character => {
             sel.cursor.col = num_cols.saturating_sub(1);
         }
         KeyCode::PageUp => {
@@ -4109,6 +4321,7 @@ mod tests {
     // === Visual mode entry tests ===
 
     #[test]
+    #[allow(unused_assignments)]
     fn enter_visual_char_sets_selection_state_and_mode() {
         let mut selection_state: Option<SelectionState> = None;
         let mut input_handler = InputHandler::new();
@@ -4129,6 +4342,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unused_assignments)]
     fn enter_visual_line_sets_selection_state_and_mode() {
         let mut selection_state: Option<SelectionState> = None;
         let mut input_handler = InputHandler::new();
@@ -4148,6 +4362,7 @@ mod tests {
     // === Visual mode exit tests ===
 
     #[test]
+    #[allow(unused_assignments)]
     fn esc_in_visual_mode_clears_selection_and_returns_to_scrollback() {
         let mut selection_state: Option<SelectionState> = Some(
             SelectionState::new(
@@ -4167,6 +4382,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unused_assignments)]
     fn yank_in_visual_mode_clears_selection_and_returns_to_scrollback() {
         let mut selection_state: Option<SelectionState> = Some(
             SelectionState::new(
@@ -4321,6 +4537,7 @@ mod tests {
     // === exit_scrollback_if_active clears selection_state ===
 
     #[test]
+    #[allow(unused_assignments)]
     fn exit_scrollback_clears_selection_state() {
         let mut selection_state: Option<SelectionState> = Some(
             SelectionState::new(
@@ -4333,6 +4550,138 @@ mod tests {
         selection_state = None;
 
         assert!(selection_state.is_none(), "exit_scrollback should clear selection_state");
+    }
+
+    // =========================================================================
+    // Phase 19 tests: ScrollbackCursor (#117, #119)
+    // =========================================================================
+
+    #[test]
+    fn scrollback_cursor_default_is_zero() {
+        let cursor = ScrollbackCursor::default();
+        assert_eq!(cursor.row, 0);
+        assert_eq!(cursor.col, 0);
+    }
+
+    #[test]
+    fn scrollback_cursor_left_decrements_col() {
+        let mut cursor = ScrollbackCursor { row: 5, col: 3 };
+        cursor.col = cursor.col.saturating_sub(1);
+        assert_eq!(cursor.col, 2);
+    }
+
+    #[test]
+    fn scrollback_cursor_left_clamps_at_zero() {
+        let mut cursor = ScrollbackCursor { row: 5, col: 0 };
+        cursor.col = cursor.col.saturating_sub(1);
+        assert_eq!(cursor.col, 0);
+    }
+
+    #[test]
+    fn scrollback_cursor_right_increments_col() {
+        let mut cursor = ScrollbackCursor { row: 5, col: 3 };
+        let cols: usize = 80;
+        cursor.col = (cursor.col + 1).min(cols - 1);
+        assert_eq!(cursor.col, 4);
+    }
+
+    #[test]
+    fn scrollback_cursor_right_clamps_at_max_col() {
+        let mut cursor = ScrollbackCursor { row: 5, col: 79 };
+        let cols: usize = 80;
+        cursor.col = (cursor.col + 1).min(cols - 1);
+        assert_eq!(cursor.col, 79);
+    }
+
+    #[test]
+    fn scrollback_cursor_line_start_sets_col_to_zero() {
+        let mut cursor = ScrollbackCursor { row: 5, col: 42 };
+        cursor.col = 0;
+        assert_eq!(cursor.col, 0);
+    }
+
+    #[test]
+    fn scrollback_cursor_line_end_sets_col_to_last() {
+        let mut cursor = ScrollbackCursor { row: 5, col: 0 };
+        let cols: usize = 80;
+        cursor.col = cols - 1;
+        assert_eq!(cursor.col, 79);
+    }
+
+    #[test]
+    fn scrollback_cursor_up_decrements_row() {
+        let mut cursor = ScrollbackCursor { row: 10, col: 0 };
+        cursor.row = cursor.row.saturating_sub(1);
+        assert_eq!(cursor.row, 9);
+    }
+
+    #[test]
+    fn scrollback_cursor_up_clamps_at_row_zero() {
+        let mut cursor = ScrollbackCursor { row: 0, col: 0 };
+        cursor.row = cursor.row.saturating_sub(1);
+        assert_eq!(cursor.row, 0);
+    }
+
+    #[test]
+    fn scrollback_cursor_down_increments_row() {
+        let mut cursor = ScrollbackCursor { row: 5, col: 0 };
+        let total_rows: usize = 100;
+        cursor.row = (cursor.row + 1).min(total_rows.saturating_sub(1));
+        assert_eq!(cursor.row, 6);
+    }
+
+    #[test]
+    fn scrollback_cursor_down_clamps_at_total_rows_minus_one() {
+        let mut cursor = ScrollbackCursor { row: 99, col: 0 };
+        let total_rows: usize = 100;
+        cursor.row = (cursor.row + 1).min(total_rows.saturating_sub(1));
+        assert_eq!(cursor.row, 99);
+    }
+
+    #[test]
+    #[allow(unused_assignments)]
+    fn scrollback_cursor_reset_on_exit() {
+        let mut cursor = ScrollbackCursor { row: 42, col: 15 };
+        cursor = ScrollbackCursor::default();
+        assert_eq!(cursor.row, 0);
+        assert_eq!(cursor.col, 0);
+    }
+
+    #[test]
+    fn scrollback_cursor_top_sets_row_zero_col_zero() {
+        let mut cursor = ScrollbackCursor { row: 50, col: 10 };
+        cursor.row = 0;
+        cursor.col = 0;
+        assert_eq!(cursor.row, 0);
+        assert_eq!(cursor.col, 0);
+    }
+
+    #[test]
+    fn scrollback_cursor_bottom_sets_row_to_total_minus_one() {
+        let mut cursor = ScrollbackCursor { row: 0, col: 0 };
+        let total_rows: usize = 200;
+        cursor.row = total_rows.saturating_sub(1);
+        assert_eq!(cursor.row, 199);
+    }
+
+    // === Phase 19 tests: EnterVisualChar/Line uses scrollback_cursor (#120) ===
+
+    #[test]
+    fn enter_visual_char_initial_pos_from_scrollback_cursor() {
+        // Simulate the SelectionPos calculation from scrollback_cursor
+        let scrollback_cursor = ScrollbackCursor { row: 42, col: 15 };
+        let initial_pos = SelectionPos { row: scrollback_cursor.row, col: scrollback_cursor.col };
+        assert_eq!(initial_pos.row, 42);
+        assert_eq!(initial_pos.col, 15);
+    }
+
+    #[test]
+    fn enter_visual_line_initial_pos_uses_cursor_row_col_zero() {
+        // Line mode: row from scrollback_cursor, col always 0
+        let scrollback_cursor = ScrollbackCursor { row: 42, col: 15 };
+        let initial_pos = SelectionPos { row: scrollback_cursor.row, col: 0 };
+        assert_eq!(initial_pos.row, 42);
+        assert_eq!(initial_pos.col, 0);
     }
 
     // =========================================================================
@@ -4694,7 +5043,7 @@ mod tests {
         let size = TerminalSize::new(80, 24);
         let _id1 = controller.usecase_mut()
             .create_terminal(Some("alpha".to_string()), size).unwrap();
-        let id2 = controller.usecase_mut()
+        let _id2 = controller.usecase_mut()
             .create_terminal(Some("beta".to_string()), size).unwrap();
 
         let mut yank_buffer: Option<String> = None;
@@ -4940,5 +5289,82 @@ mod tests {
         let cmd = IpcCommand::ShowBuffer;
         let _ = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
         assert_eq!(yank_buffer.as_deref(), Some("existing"));
+    }
+
+    // =========================================================================
+    // handle_visual_key Line mode h/l/0/$ no-op tests (Major-3)
+    // =========================================================================
+
+    /// Simulate the handle_visual_key h/l/0/$ guard logic for Line mode.
+    /// In Line mode, h/l/0/$ should NOT change cursor.col.
+    fn apply_visual_key_col_change(mode: SelectionMode, key: char, col: usize, num_cols: usize) -> usize {
+        match key {
+            'h' if mode == SelectionMode::Character => col.saturating_sub(1),
+            'l' if mode == SelectionMode::Character => (col + 1).min(num_cols.saturating_sub(1)),
+            '0' if mode == SelectionMode::Character => 0,
+            '$' if mode == SelectionMode::Character => num_cols.saturating_sub(1),
+            // In Line mode (or unrecognized keys), col is unchanged
+            _ => col,
+        }
+    }
+
+    #[test]
+    fn visual_line_mode_h_does_not_change_col() {
+        let col = apply_visual_key_col_change(SelectionMode::Line, 'h', 5, 80);
+        assert_eq!(col, 5, "Line mode 'h' should not change cursor.col");
+    }
+
+    #[test]
+    fn visual_line_mode_l_does_not_change_col() {
+        let col = apply_visual_key_col_change(SelectionMode::Line, 'l', 5, 80);
+        assert_eq!(col, 5, "Line mode 'l' should not change cursor.col");
+    }
+
+    #[test]
+    fn visual_line_mode_zero_does_not_change_col() {
+        let col = apply_visual_key_col_change(SelectionMode::Line, '0', 5, 80);
+        assert_eq!(col, 5, "Line mode '0' should not change cursor.col");
+    }
+
+    #[test]
+    fn visual_line_mode_dollar_does_not_change_col() {
+        let col = apply_visual_key_col_change(SelectionMode::Line, '$', 5, 80);
+        assert_eq!(col, 5, "Line mode '$' should not change cursor.col");
+    }
+
+    #[test]
+    fn visual_character_mode_h_decrements_col() {
+        let col = apply_visual_key_col_change(SelectionMode::Character, 'h', 5, 80);
+        assert_eq!(col, 4, "Character mode 'h' should decrement cursor.col");
+    }
+
+    #[test]
+    fn visual_character_mode_l_increments_col() {
+        let col = apply_visual_key_col_change(SelectionMode::Character, 'l', 5, 80);
+        assert_eq!(col, 6, "Character mode 'l' should increment cursor.col");
+    }
+
+    #[test]
+    fn visual_character_mode_zero_sets_col_to_zero() {
+        let col = apply_visual_key_col_change(SelectionMode::Character, '0', 5, 80);
+        assert_eq!(col, 0, "Character mode '0' should set cursor.col to 0");
+    }
+
+    #[test]
+    fn visual_character_mode_dollar_sets_col_to_last() {
+        let col = apply_visual_key_col_change(SelectionMode::Character, '$', 5, 80);
+        assert_eq!(col, 79, "Character mode '$' should set cursor.col to num_cols - 1");
+    }
+
+    #[test]
+    fn visual_line_mode_h_at_col_zero_stays_zero() {
+        let col = apply_visual_key_col_change(SelectionMode::Line, 'h', 0, 80);
+        assert_eq!(col, 0, "Line mode 'h' at col 0 should stay at 0");
+    }
+
+    #[test]
+    fn visual_character_mode_h_at_col_zero_saturates() {
+        let col = apply_visual_key_col_change(SelectionMode::Character, 'h', 0, 80);
+        assert_eq!(col, 0, "Character mode 'h' at col 0 should saturate at 0");
     }
 }
