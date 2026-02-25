@@ -2121,10 +2121,11 @@ fn handle_dialog_key<P: PtyPort, S: ScreenPort>(
             }
             KeyCode::Enter => {
                 if !input.is_empty() {
-                    controller.dispatch(
+                    // Best-effort: terminal may have been deleted while dialog was open
+                    let _ = controller.dispatch(
                         AppAction::RenameTerminal { name: input.clone() },
                         size,
-                    )?;
+                    );
                 }
                 *dialog = DialogState::None;
                 input_handler.set_mode(InputMode::Normal);
@@ -2154,10 +2155,11 @@ fn handle_dialog_key<P: PtyPort, S: ScreenPort>(
             }
             // Enter: save and close
             KeyCode::Enter => {
-                controller.dispatch(
+                // Best-effort: terminal may have been deleted while dialog was open
+                let _ = controller.dispatch(
                     AppAction::SaveMemo { text: text.clone() },
                     size,
-                )?;
+                );
                 *dialog = DialogState::None;
                 input_handler.set_mode(InputMode::Normal);
             }

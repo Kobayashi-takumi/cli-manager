@@ -54,10 +54,12 @@ impl<P: PtyPort, S: ScreenPort> TerminalUsecase<P, S> {
         let terminal = &self.terminals[index];
         let id = terminal.id();
 
+        // Best-effort cleanup: always complete removal even if kill/remove fails.
+        // This prevents ghost terminals that exist in the Vec but have no PTY/Screen.
         if terminal.status().is_running() {
-            self.pty_port.kill(id)?;
+            let _ = self.pty_port.kill(id);
         }
-        self.screen_port.remove(id)?;
+        let _ = self.screen_port.remove(id);
         self.terminals.remove(index);
 
         if self.terminals.is_empty() {
@@ -252,6 +254,7 @@ mod tests {
         read_results: Arc<Mutex<HashMap<u32, Result<Vec<u8>, AppError>>>>,
         try_wait_results: Arc<Mutex<HashMap<u32, Result<Option<i32>, AppError>>>>,
         spawn_should_fail: bool,
+        kill_should_fail: bool,
     }
 
     impl MockPtyPort {
@@ -264,11 +267,17 @@ mod tests {
                 read_results: Arc::new(Mutex::new(HashMap::new())),
                 try_wait_results: Arc::new(Mutex::new(HashMap::new())),
                 spawn_should_fail: false,
+                kill_should_fail: false,
             }
         }
 
         fn with_spawn_failure(mut self) -> Self {
             self.spawn_should_fail = true;
+            self
+        }
+
+        fn with_kill_failure(mut self) -> Self {
+            self.kill_should_fail = true;
             self
         }
 
@@ -341,6 +350,15 @@ mod tests {
 
         fn kill(&mut self, id: TerminalId) -> Result<(), AppError> {
             self.kill_calls.lock().unwrap().push(id);
+            if self.kill_should_fail {
+                return Err(AppError::PtyIo {
+                    id,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "mock kill failure",
+                    ),
+                });
+            }
             Ok(())
         }
     }
@@ -713,6 +731,40 @@ mod tests {
         assert_eq!(uc.get_terminals().len(), 2);
         assert_eq!(uc.get_active_index(), Some(1));
         assert_eq!(uc.get_active_terminal().unwrap().name(), "t3");
+    }
+
+    #[test]
+    fn close_active_terminal_completes_cleanup_even_when_kill_fails() {
+        let pty = MockPtyPort::new().with_kill_failure();
+        let screen = MockScreenPort::new();
+        let mut uc = make_usecase_with_ports(pty, screen);
+        let size = default_size();
+
+        uc.create_terminal(Some("t1".to_string()), size).unwrap();
+        uc.create_terminal(Some("t2".to_string()), size).unwrap();
+
+        // active is t2 (index 1). kill() will fail, but close should still complete.
+        let result = uc.close_active_terminal();
+        assert!(result.is_ok());
+
+        // Terminal must be removed from the list despite kill failure
+        assert_eq!(uc.get_terminals().len(), 1);
+        assert_eq!(uc.get_active_terminal().unwrap().name(), "t1");
+        assert_eq!(uc.get_active_index(), Some(0));
+    }
+
+    #[test]
+    fn close_active_terminal_with_kill_failure_leaves_no_ghost() {
+        let pty = MockPtyPort::new().with_kill_failure();
+        let screen = MockScreenPort::new();
+        let mut uc = make_usecase_with_ports(pty, screen);
+        let size = default_size();
+
+        uc.create_terminal(Some("only".to_string()), size).unwrap();
+        uc.close_active_terminal().unwrap();
+
+        assert!(uc.get_terminals().is_empty());
+        assert_eq!(uc.get_active_index(), None);
     }
 
     // =========================================================================

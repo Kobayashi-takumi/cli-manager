@@ -188,11 +188,9 @@ impl PtyPort for PortablePtyAdapter {
             .remove(&id)
             .ok_or(AppError::TerminalNotFound(id))?;
 
-        instance
-            .child
-            .kill()
-            .map_err(|e| AppError::PtyIo { id, source: e })?;
-        // Reap the child process to avoid zombies
+        // Best-effort kill: process may have already exited, so ignore kill errors.
+        // Always reap the child to avoid zombies and free resources.
+        let _ = instance.child.kill();
         let _ = instance.child.wait();
         Ok(())
     }
