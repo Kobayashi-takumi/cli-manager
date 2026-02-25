@@ -113,6 +113,69 @@ fn build_request(subcommand: &str, args: &[String]) -> Result<String, String> {
             .to_string())
         }
         "show-buffer" => Ok(serde_json::json!({"cmd": "show-buffer"}).to_string()),
+        "create-window" => {
+            let mut obj = serde_json::json!({"cmd": "create-window"});
+            let mut i = 0;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--name" => {
+                        if i + 1 < args.len() {
+                            obj["name"] = serde_json::json!(&args[i + 1]);
+                            i += 2;
+                        } else {
+                            return Err("--name requires a value".to_string());
+                        }
+                    }
+                    "--cmd" => {
+                        if i + 1 < args.len() {
+                            obj["command"] = serde_json::json!(&args[i + 1]);
+                            i += 2;
+                        } else {
+                            return Err("--cmd requires a value".to_string());
+                        }
+                    }
+                    other => {
+                        return Err(format!("unknown option: {}", other));
+                    }
+                }
+            }
+            Ok(obj.to_string())
+        }
+        "kill-window" => {
+            let (target, _) = parse_target_and_rest(args, "kill-window")?;
+            Ok(serde_json::json!({"cmd": "kill-window", "target": target}).to_string())
+        }
+        "select-window" => {
+            let (target, _) = parse_target_and_rest(args, "select-window")?;
+            Ok(serde_json::json!({"cmd": "select-window", "target": target}).to_string())
+        }
+        "rename-window" => {
+            let (target, rest2) = parse_target_and_rest(args, "rename-window")?;
+            let mut name: Option<String> = None;
+            let mut i = 0;
+            while i < rest2.len() {
+                if rest2[i] == "--name" {
+                    if i + 1 < rest2.len() {
+                        name = Some(rest2[i + 1].clone());
+                        i += 2;
+                    } else {
+                        return Err("--name requires a value".to_string());
+                    }
+                } else {
+                    return Err(format!("unknown option: {}", rest2[i]));
+                }
+            }
+            let name = match name {
+                Some(n) => n,
+                None => {
+                    return Err("--name is required for rename-window".to_string());
+                }
+            };
+            Ok(
+                serde_json::json!({"cmd": "rename-window", "target": target, "name": name})
+                    .to_string(),
+            )
+        }
         _ => Err(format!("unknown subcommand: {}", subcommand)),
     }
 }
@@ -147,8 +210,13 @@ fn parse_target_and_rest(args: &[String], cmd_name: &str) -> Result<(u32, Vec<St
 }
 
 fn send_request(json: &str) -> Result<String, String> {
-    let socket_path = std::env::var("CLI_MANAGER_SOCK")
-        .map_err(|_| "CLI_MANAGER_SOCK not set. Are you running inside cli-manager?".to_string())?;
+    // Try CLI_MANAGER_SOCK env var first, then fall back to discovery file
+    let socket_path = std::env::var("CLI_MANAGER_SOCK").or_else(|_| {
+        crate::infrastructure::ipc::socket_discovery::read_socket_path()
+            .map_err(|_| ())
+    }).map_err(|_| {
+        "No running cli-manager instance found. Is cli-manager running?".to_string()
+    })?;
 
     let mut stream = UnixStream::connect(&socket_path)
         .map_err(|e| format!("cannot connect to {}: {}", socket_path, e))?;
@@ -178,12 +246,16 @@ fn print_usage() {
     eprintln!("Usage: cm ctl <subcommand> [options]");
     eprintln!();
     eprintln!("Subcommands:");
-    eprintln!("  send-keys -t <id> <keys...>     Send keys to terminal");
-    eprintln!("  capture-pane -t <id> [-S]        Capture terminal content");
-    eprintln!("  list-windows                     List all terminals");
-    eprintln!("  paste-buffer -t <id>             Paste yank buffer to terminal");
-    eprintln!("  set-buffer <text>                Set yank buffer text");
-    eprintln!("  show-buffer                      Show yank buffer content");
+    eprintln!("  send-keys -t <id> <keys...>      Send keys to terminal");
+    eprintln!("  capture-pane -t <id> [-S]         Capture terminal content");
+    eprintln!("  list-windows                      List all terminals");
+    eprintln!("  paste-buffer -t <id>              Paste yank buffer to terminal");
+    eprintln!("  set-buffer <text>                 Set yank buffer text");
+    eprintln!("  show-buffer                       Show yank buffer content");
+    eprintln!("  create-window [--name <n>] [--cmd <c>]  Create a new terminal");
+    eprintln!("  kill-window -t <id>               Kill a terminal");
+    eprintln!("  select-window -t <id>             Select (focus) a terminal");
+    eprintln!("  rename-window -t <id> --name <n>  Rename a terminal");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --raw    Output raw JSON response");
@@ -482,22 +554,33 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn send_request_without_env_var() {
+    fn send_request_without_env_var_or_discovery() {
         // Temporarily remove the env var if set
         let saved = std::env::var("CLI_MANAGER_SOCK").ok();
         unsafe {
             std::env::remove_var("CLI_MANAGER_SOCK");
         }
+        // Also ensure discovery file doesn't exist
+        let discovery_path = crate::infrastructure::ipc::socket_discovery::discovery_file_path();
+        let saved_discovery = std::fs::read_to_string(&discovery_path).ok();
+        let _ = std::fs::remove_file(&discovery_path);
+
         let result = send_request("{}");
-        // Restore
+
+        // Restore env var
         if let Some(val) = saved {
             unsafe {
                 std::env::set_var("CLI_MANAGER_SOCK", val);
             }
         }
+        // Restore discovery file
+        if let Some(content) = saved_discovery {
+            let _ = std::fs::write(&discovery_path, content);
+        }
+
         let err = result.unwrap_err();
         assert!(
-            err.contains("CLI_MANAGER_SOCK not set"),
+            err.contains("No running cli-manager instance found"),
             "got: {err}"
         );
     }
@@ -523,6 +606,236 @@ mod tests {
         assert!(
             err.contains("cannot connect to"),
             "got: {err}"
+        );
+    }
+
+    // ========================================================================
+    // Tests: build_request — create-window
+    // ========================================================================
+
+    #[test]
+    fn build_request_create_window_no_options() {
+        let args = s(&[]);
+        let json_str = build_request("create-window", &args).unwrap();
+        let v: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["cmd"], "create-window");
+        // No name or command fields when not specified
+        assert!(v.get("name").is_none());
+        assert!(v.get("command").is_none());
+    }
+
+    #[test]
+    fn build_request_create_window_with_name() {
+        let args = s(&["--name", "my-terminal"]);
+        let json_str = build_request("create-window", &args).unwrap();
+        let v: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["cmd"], "create-window");
+        assert_eq!(v["name"], "my-terminal");
+        assert!(v.get("command").is_none());
+    }
+
+    #[test]
+    fn build_request_create_window_with_cmd() {
+        let args = s(&["--cmd", "bash"]);
+        let json_str = build_request("create-window", &args).unwrap();
+        let v: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["cmd"], "create-window");
+        assert_eq!(v["command"], "bash");
+        assert!(v.get("name").is_none());
+    }
+
+    #[test]
+    fn build_request_create_window_with_name_and_cmd() {
+        let args = s(&["--name", "dev", "--cmd", "zsh"]);
+        let json_str = build_request("create-window", &args).unwrap();
+        let v: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["cmd"], "create-window");
+        assert_eq!(v["name"], "dev");
+        assert_eq!(v["command"], "zsh");
+    }
+
+    #[test]
+    fn build_request_create_window_name_missing_value() {
+        let args = s(&["--name"]);
+        let err = build_request("create-window", &args).unwrap_err();
+        assert!(err.contains("--name requires a value"), "got: {err}");
+    }
+
+    #[test]
+    fn build_request_create_window_cmd_missing_value() {
+        let args = s(&["--cmd"]);
+        let err = build_request("create-window", &args).unwrap_err();
+        assert!(err.contains("--cmd requires a value"), "got: {err}");
+    }
+
+    #[test]
+    fn build_request_create_window_unknown_option() {
+        let args = s(&["--foo"]);
+        let err = build_request("create-window", &args).unwrap_err();
+        assert!(err.contains("unknown option: --foo"), "got: {err}");
+    }
+
+    // ========================================================================
+    // Tests: build_request — kill-window
+    // ========================================================================
+
+    #[test]
+    fn build_request_kill_window() {
+        let args = s(&["-t", "3"]);
+        let json_str = build_request("kill-window", &args).unwrap();
+        let v: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["cmd"], "kill-window");
+        assert_eq!(v["target"], 3);
+    }
+
+    #[test]
+    fn build_request_kill_window_missing_target() {
+        let args = s(&[]);
+        let err = build_request("kill-window", &args).unwrap_err();
+        assert!(err.contains("requires -t <id>"), "got: {err}");
+    }
+
+    // ========================================================================
+    // Tests: build_request — select-window
+    // ========================================================================
+
+    #[test]
+    fn build_request_select_window() {
+        let args = s(&["-t", "7"]);
+        let json_str = build_request("select-window", &args).unwrap();
+        let v: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["cmd"], "select-window");
+        assert_eq!(v["target"], 7);
+    }
+
+    #[test]
+    fn build_request_select_window_missing_target() {
+        let args = s(&[]);
+        let err = build_request("select-window", &args).unwrap_err();
+        assert!(err.contains("requires -t <id>"), "got: {err}");
+    }
+
+    // ========================================================================
+    // Tests: build_request — rename-window
+    // ========================================================================
+
+    #[test]
+    fn build_request_rename_window() {
+        let args = s(&["-t", "2", "--name", "new-name"]);
+        let json_str = build_request("rename-window", &args).unwrap();
+        let v: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["cmd"], "rename-window");
+        assert_eq!(v["target"], 2);
+        assert_eq!(v["name"], "new-name");
+    }
+
+    #[test]
+    fn build_request_rename_window_missing_target() {
+        let args = s(&["--name", "foo"]);
+        let err = build_request("rename-window", &args).unwrap_err();
+        assert!(err.contains("requires -t <id>"), "got: {err}");
+    }
+
+    #[test]
+    fn build_request_rename_window_missing_name() {
+        let args = s(&["-t", "2"]);
+        let err = build_request("rename-window", &args).unwrap_err();
+        assert!(err.contains("--name is required"), "got: {err}");
+    }
+
+    #[test]
+    fn build_request_rename_window_name_missing_value() {
+        let args = s(&["-t", "2", "--name"]);
+        let err = build_request("rename-window", &args).unwrap_err();
+        assert!(err.contains("--name requires a value"), "got: {err}");
+    }
+
+    #[test]
+    fn build_request_rename_window_unknown_option() {
+        let args = s(&["-t", "2", "--foo"]);
+        let err = build_request("rename-window", &args).unwrap_err();
+        assert!(err.contains("unknown option: --foo"), "got: {err}");
+    }
+
+    // ========================================================================
+    // Tests: build_request — new subcommands roundtrip
+    // ========================================================================
+
+    #[test]
+    fn build_request_create_window_roundtrip_with_protocol() {
+        let args = s(&["--name", "test", "--cmd", "bash -l"]);
+        let json_str = build_request("create-window", &args).unwrap();
+        let v: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["cmd"], "create-window");
+        assert_eq!(v["name"], "test");
+        assert_eq!(v["command"], "bash -l");
+    }
+
+    #[test]
+    fn build_request_kill_window_roundtrip_with_protocol() {
+        let args = s(&["-t", "10"]);
+        let json_str = build_request("kill-window", &args).unwrap();
+        let v: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["cmd"], "kill-window");
+        assert_eq!(v["target"], 10);
+    }
+
+    #[test]
+    fn build_request_select_window_roundtrip_with_protocol() {
+        let args = s(&["-t", "4"]);
+        let json_str = build_request("select-window", &args).unwrap();
+        let v: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["cmd"], "select-window");
+        assert_eq!(v["target"], 4);
+    }
+
+    #[test]
+    fn build_request_rename_window_roundtrip_with_protocol() {
+        let args = s(&["-t", "1", "--name", "renamed"]);
+        let json_str = build_request("rename-window", &args).unwrap();
+        let v: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["cmd"], "rename-window");
+        assert_eq!(v["target"], 1);
+        assert_eq!(v["name"], "renamed");
+    }
+
+    #[test]
+    fn send_request_falls_back_to_discovery_file() {
+        // When CLI_MANAGER_SOCK is not set, send_request should try the discovery file.
+        // We write an invalid socket path to the discovery file and verify it
+        // attempts to connect (and fails with "cannot connect to").
+        let saved_env = std::env::var("CLI_MANAGER_SOCK").ok();
+        unsafe {
+            std::env::remove_var("CLI_MANAGER_SOCK");
+        }
+
+        let discovery_path = crate::infrastructure::ipc::socket_discovery::discovery_file_path();
+        let saved_discovery = std::fs::read_to_string(&discovery_path).ok();
+
+        // Write a non-existent socket path to the discovery file
+        let _ = crate::infrastructure::ipc::socket_discovery::write_socket_path(
+            "/tmp/nonexistent-cm-discovery-test.sock",
+        );
+
+        let result = send_request("{}");
+
+        // Restore env var
+        if let Some(val) = saved_env {
+            unsafe {
+                std::env::set_var("CLI_MANAGER_SOCK", val);
+            }
+        }
+        // Restore discovery file
+        if let Some(content) = saved_discovery {
+            let _ = std::fs::write(&discovery_path, content);
+        } else {
+            let _ = std::fs::remove_file(&discovery_path);
+        }
+
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("cannot connect to"),
+            "discovery fallback should attempt connection; got: {err}"
         );
     }
 }

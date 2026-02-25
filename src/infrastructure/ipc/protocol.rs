@@ -18,6 +18,8 @@ struct RawRequest {
     keys: Option<Vec<String>>,
     scrollback: Option<bool>,
     text: Option<String>,
+    name: Option<String>,
+    command: Option<String>,
 }
 
 // ============================================================================
@@ -122,6 +124,31 @@ pub fn parse_command(json: &str) -> Result<IpcCommand, String> {
             Ok(IpcCommand::SetBuffer { text })
         }
         "show-buffer" => Ok(IpcCommand::ShowBuffer),
+        "create-window" => Ok(IpcCommand::CreateWindow {
+            name: raw.name,
+            command: raw.command,
+        }),
+        "kill-window" => {
+            let target = raw
+                .target
+                .ok_or_else(|| "missing field: target".to_string())?;
+            Ok(IpcCommand::KillWindow { target })
+        }
+        "select-window" => {
+            let target = raw
+                .target
+                .ok_or_else(|| "missing field: target".to_string())?;
+            Ok(IpcCommand::SelectWindow { target })
+        }
+        "rename-window" => {
+            let target = raw
+                .target
+                .ok_or_else(|| "missing field: target".to_string())?;
+            let name = raw
+                .name
+                .ok_or_else(|| "missing field: name".to_string())?;
+            Ok(IpcCommand::RenameWindow { target, name })
+        }
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -192,6 +219,17 @@ pub fn serialize_response(response: &IpcResponse) -> String {
                     },
                 };
                 serde_json::to_string(&payload).expect("serialize Buffer")
+            }
+            IpcResponseData::CreateWindow { id } => {
+                #[derive(Serialize)]
+                struct CreateWindowData {
+                    id: u32,
+                }
+                let payload = DataResponse {
+                    ok: true,
+                    data: CreateWindowData { id: *id },
+                };
+                serde_json::to_string(&payload).expect("serialize CreateWindow")
             }
         },
     }
@@ -572,5 +610,103 @@ mod tests {
                 keys: vec!["日本語入力".to_string(), "Enter".to_string()],
             }
         );
+    }
+
+    // ========================================================================
+    // Tests: parse_command — new window management commands
+    // ========================================================================
+
+    #[test]
+    fn parse_create_window_all_fields() {
+        let json = r#"{"cmd": "create-window", "name": "my-term", "command": "/bin/bash"}"#;
+        let cmd = parse_command(json).unwrap();
+        assert_eq!(
+            cmd,
+            IpcCommand::CreateWindow {
+                name: Some("my-term".to_string()),
+                command: Some("/bin/bash".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_create_window_no_optional_fields() {
+        let json = r#"{"cmd": "create-window"}"#;
+        let cmd = parse_command(json).unwrap();
+        assert_eq!(
+            cmd,
+            IpcCommand::CreateWindow {
+                name: None,
+                command: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_kill_window() {
+        let json = r#"{"cmd": "kill-window", "target": 5}"#;
+        let cmd = parse_command(json).unwrap();
+        assert_eq!(cmd, IpcCommand::KillWindow { target: 5 });
+    }
+
+    #[test]
+    fn parse_kill_window_missing_target() {
+        let json = r#"{"cmd": "kill-window"}"#;
+        let err = parse_command(json).unwrap_err();
+        assert!(err.contains("missing field: target"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_select_window() {
+        let json = r#"{"cmd": "select-window", "target": 2}"#;
+        let cmd = parse_command(json).unwrap();
+        assert_eq!(cmd, IpcCommand::SelectWindow { target: 2 });
+    }
+
+    #[test]
+    fn parse_select_window_missing_target() {
+        let json = r#"{"cmd": "select-window"}"#;
+        let err = parse_command(json).unwrap_err();
+        assert!(err.contains("missing field: target"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_rename_window() {
+        let json = r#"{"cmd": "rename-window", "target": 3, "name": "new-name"}"#;
+        let cmd = parse_command(json).unwrap();
+        assert_eq!(
+            cmd,
+            IpcCommand::RenameWindow {
+                target: 3,
+                name: "new-name".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_rename_window_missing_name() {
+        let json = r#"{"cmd": "rename-window", "target": 3}"#;
+        let err = parse_command(json).unwrap_err();
+        assert!(err.contains("missing field: name"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_rename_window_missing_target() {
+        let json = r#"{"cmd": "rename-window", "name": "new-name"}"#;
+        let err = parse_command(json).unwrap_err();
+        assert!(err.contains("missing field: target"), "got: {err}");
+    }
+
+    // ========================================================================
+    // Tests: serialize_response — CreateWindow
+    // ========================================================================
+
+    #[test]
+    fn serialize_create_window_response() {
+        let resp = IpcResponse::OkWithData(IpcResponseData::CreateWindow { id: 3 });
+        let json = serialize_response(&resp);
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["data"]["id"], 3);
     }
 }

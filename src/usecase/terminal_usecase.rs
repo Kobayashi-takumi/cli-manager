@@ -191,6 +191,58 @@ impl<P: PtyPort, S: ScreenPort> TerminalUsecase<P, S> {
         self.terminals.iter().find(|t| t.id() == id)
     }
 
+    pub fn close_by_id(&mut self, id: TerminalId) -> Result<(), AppError> {
+        let index = self
+            .terminals
+            .iter()
+            .position(|t| t.id() == id)
+            .ok_or(AppError::TerminalNotFound(id))?;
+
+        // Best-effort cleanup: always complete removal even if kill/remove fails.
+        if self.terminals[index].status().is_running() {
+            let _ = self.pty_port.kill(id);
+        }
+        let _ = self.screen_port.remove(id);
+        self.terminals.remove(index);
+
+        if self.terminals.is_empty() {
+            self.active_index = None;
+        } else if let Some(active) = self.active_index {
+            if index < active {
+                self.active_index = Some(active - 1);
+            } else if index == active {
+                // Clamp to last valid index
+                self.active_index = Some(active.min(self.terminals.len() - 1));
+            }
+            // index > active → no change needed
+        }
+
+        Ok(())
+    }
+
+    pub fn select_by_id(&mut self, id: TerminalId) -> Result<(), AppError> {
+        let index = self
+            .terminals
+            .iter()
+            .position(|t| t.id() == id)
+            .ok_or(AppError::TerminalNotFound(id))?;
+
+        self.active_index = Some(index);
+        self.terminals[index].clear_notification();
+        Ok(())
+    }
+
+    pub fn rename_by_id(&mut self, id: TerminalId, name: String) -> Result<(), AppError> {
+        let terminal = self
+            .terminals
+            .iter_mut()
+            .find(|t| t.id() == id)
+            .ok_or(AppError::TerminalNotFound(id))?;
+
+        terminal.set_name(name);
+        Ok(())
+    }
+
     /// Drain and return all pending notification events collected during `poll_all()`.
     /// Each entry is a `(terminal_name, notification_event)` pair.
     /// After calling this method, the internal pending list is cleared.
@@ -1681,5 +1733,194 @@ mod tests {
         let terminal = uc.get_terminal_by_id(id2);
         assert!(terminal.is_some());
         assert_eq!(terminal.unwrap().name(), "second");
+    }
+
+    // =========================================================================
+    // Tests: close_by_id
+    // =========================================================================
+
+    #[test]
+    fn close_by_id_removes_terminal_and_calls_kill_and_remove() {
+        let pty = MockPtyPort::new();
+        let kill_calls = pty.kill_calls.clone();
+        let screen = MockScreenPort::new();
+        let mut uc = make_usecase_with_ports(pty, screen);
+        let size = default_size();
+
+        let id1 = uc.create_terminal(Some("t1".to_string()), size).unwrap();
+        let _id2 = uc.create_terminal(Some("t2".to_string()), size).unwrap();
+
+        uc.close_by_id(id1).unwrap();
+
+        // Terminal removed from list
+        assert_eq!(uc.get_terminals().len(), 1);
+        assert_eq!(uc.get_terminals()[0].name(), "t2");
+
+        // kill and remove were called
+        let kills = kill_calls.lock().unwrap();
+        assert_eq!(kills.len(), 1);
+        assert_eq!(kills[0], id1);
+
+        assert_eq!(uc.screen_port.remove_calls.len(), 1);
+        assert_eq!(uc.screen_port.remove_calls[0], id1);
+    }
+
+    #[test]
+    fn close_by_id_active_terminal_adjusts_index() {
+        let mut uc = make_usecase();
+        let size = default_size();
+
+        let _id1 = uc.create_terminal(Some("t1".to_string()), size).unwrap();
+        let id2 = uc.create_terminal(Some("t2".to_string()), size).unwrap();
+        let _id3 = uc.create_terminal(Some("t3".to_string()), size).unwrap();
+
+        // active_index is 2 (t3, last created)
+        assert_eq!(uc.get_active_index(), Some(2));
+
+        // Close active terminal (t3, index 2)
+        uc.close_by_id(id2).unwrap();
+
+        // t2 was at index 1, active was at index 2.
+        // After removing index 1, active_index should remain 1 (clamped to len-1)
+        assert_eq!(uc.get_terminals().len(), 2);
+        assert_eq!(uc.get_active_index(), Some(1));
+        assert_eq!(uc.get_active_terminal().unwrap().name(), "t3");
+    }
+
+    #[test]
+    fn close_by_id_nonexistent_returns_terminal_not_found() {
+        let mut uc = make_usecase();
+        let size = default_size();
+        uc.create_terminal(None, size).unwrap();
+
+        let result = uc.close_by_id(TerminalId::new(999));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            AppError::TerminalNotFound(_)
+        ));
+    }
+
+    #[test]
+    fn close_by_id_last_terminal_sets_active_none() {
+        let mut uc = make_usecase();
+        let size = default_size();
+
+        let id1 = uc.create_terminal(Some("only".to_string()), size).unwrap();
+        uc.close_by_id(id1).unwrap();
+
+        assert!(uc.get_terminals().is_empty());
+        assert_eq!(uc.get_active_index(), None);
+    }
+
+    #[test]
+    fn close_by_id_before_active_decrements_active_index() {
+        let mut uc = make_usecase();
+        let size = default_size();
+
+        let id1 = uc.create_terminal(Some("t1".to_string()), size).unwrap();
+        let _id2 = uc.create_terminal(Some("t2".to_string()), size).unwrap();
+        let _id3 = uc.create_terminal(Some("t3".to_string()), size).unwrap();
+
+        // active_index is 2 (t3)
+        assert_eq!(uc.get_active_index(), Some(2));
+
+        // Close t1 (index 0, before active)
+        uc.close_by_id(id1).unwrap();
+
+        // active_index should decrement from 2 to 1
+        assert_eq!(uc.get_active_index(), Some(1));
+        assert_eq!(uc.get_active_terminal().unwrap().name(), "t3");
+        assert_eq!(uc.get_terminals().len(), 2);
+    }
+
+    #[test]
+    fn close_by_id_after_active_no_change_to_active_index() {
+        let mut uc = make_usecase();
+        let size = default_size();
+
+        let _id1 = uc.create_terminal(Some("t1".to_string()), size).unwrap();
+        let _id2 = uc.create_terminal(Some("t2".to_string()), size).unwrap();
+        let id3 = uc.create_terminal(Some("t3".to_string()), size).unwrap();
+
+        // Select t1 (index 0)
+        uc.select_by_index(0);
+        assert_eq!(uc.get_active_index(), Some(0));
+
+        // Close t3 (index 2, after active)
+        uc.close_by_id(id3).unwrap();
+
+        // active_index should remain 0
+        assert_eq!(uc.get_active_index(), Some(0));
+        assert_eq!(uc.get_active_terminal().unwrap().name(), "t1");
+        assert_eq!(uc.get_terminals().len(), 2);
+    }
+
+    // =========================================================================
+    // Tests: select_by_id
+    // =========================================================================
+
+    #[test]
+    fn select_by_id_sets_active_to_matching_terminal() {
+        let mut uc = make_usecase();
+        let size = default_size();
+
+        let id1 = uc.create_terminal(Some("t1".to_string()), size).unwrap();
+        let _id2 = uc.create_terminal(Some("t2".to_string()), size).unwrap();
+        let _id3 = uc.create_terminal(Some("t3".to_string()), size).unwrap();
+
+        // active_index is 2 (t3)
+        assert_eq!(uc.get_active_index(), Some(2));
+
+        uc.select_by_id(id1).unwrap();
+
+        assert_eq!(uc.get_active_index(), Some(0));
+        assert_eq!(uc.get_active_terminal().unwrap().name(), "t1");
+    }
+
+    #[test]
+    fn select_by_id_nonexistent_returns_terminal_not_found() {
+        let mut uc = make_usecase();
+        let size = default_size();
+        uc.create_terminal(None, size).unwrap();
+
+        let result = uc.select_by_id(TerminalId::new(999));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            AppError::TerminalNotFound(_)
+        ));
+    }
+
+    // =========================================================================
+    // Tests: rename_by_id
+    // =========================================================================
+
+    #[test]
+    fn rename_by_id_changes_terminal_name() {
+        let mut uc = make_usecase();
+        let size = default_size();
+
+        let id1 = uc.create_terminal(Some("original".to_string()), size).unwrap();
+        let _id2 = uc.create_terminal(Some("other".to_string()), size).unwrap();
+
+        uc.rename_by_id(id1, "renamed".to_string()).unwrap();
+
+        let terminal = uc.get_terminal_by_id(id1).unwrap();
+        assert_eq!(terminal.name(), "renamed");
+    }
+
+    #[test]
+    fn rename_by_id_nonexistent_returns_terminal_not_found() {
+        let mut uc = make_usecase();
+        let size = default_size();
+        uc.create_terminal(None, size).unwrap();
+
+        let result = uc.rename_by_id(TerminalId::new(999), "name".to_string());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            AppError::TerminalNotFound(_)
+        ));
     }
 }

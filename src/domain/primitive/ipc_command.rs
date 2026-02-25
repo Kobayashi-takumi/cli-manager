@@ -16,6 +16,17 @@ pub enum IpcCommand {
     SetBuffer { text: String },
     /// Show the current yank buffer content.
     ShowBuffer,
+    /// Create a new terminal window.
+    CreateWindow {
+        name: Option<String>,
+        command: Option<String>,
+    },
+    /// Kill (close) a terminal window.
+    KillWindow { target: u32 },
+    /// Select (activate) a terminal window.
+    SelectWindow { target: u32 },
+    /// Rename a terminal window.
+    RenameWindow { target: u32, name: String },
 }
 
 /// IPC response types returned to external clients.
@@ -47,6 +58,8 @@ pub enum IpcResponseData {
     ListWindows { windows: Vec<WindowInfo> },
     /// Yank buffer content.
     Buffer { text: Option<String> },
+    /// Created terminal window ID.
+    CreateWindow { id: u32 },
 }
 
 /// Information about a single terminal window.
@@ -627,6 +640,279 @@ mod tests {
             target: 1,
             keys: vec!["b".to_string()],
         };
+        assert_ne!(a, b);
+    }
+
+    // =========================================================================
+    // Tests: CreateWindow command
+    // =========================================================================
+
+    #[test]
+    fn create_window_with_name_and_command() {
+        let cmd = IpcCommand::CreateWindow {
+            name: Some("my-term".to_string()),
+            command: Some("/bin/bash".to_string()),
+        };
+        if let IpcCommand::CreateWindow { name, command } = &cmd {
+            assert_eq!(name.as_deref(), Some("my-term"));
+            assert_eq!(command.as_deref(), Some("/bin/bash"));
+        } else {
+            panic!("Expected CreateWindow variant");
+        }
+    }
+
+    #[test]
+    fn create_window_with_no_args() {
+        let cmd = IpcCommand::CreateWindow {
+            name: None,
+            command: None,
+        };
+        if let IpcCommand::CreateWindow { name, command } = &cmd {
+            assert!(name.is_none());
+            assert!(command.is_none());
+        } else {
+            panic!("Expected CreateWindow variant");
+        }
+    }
+
+    #[test]
+    fn create_window_with_name_only() {
+        let cmd = IpcCommand::CreateWindow {
+            name: Some("editor".to_string()),
+            command: None,
+        };
+        if let IpcCommand::CreateWindow { name, command } = &cmd {
+            assert_eq!(name.as_deref(), Some("editor"));
+            assert!(command.is_none());
+        } else {
+            panic!("Expected CreateWindow variant");
+        }
+    }
+
+    #[test]
+    fn create_window_with_command_only() {
+        let cmd = IpcCommand::CreateWindow {
+            name: None,
+            command: Some("vim".to_string()),
+        };
+        if let IpcCommand::CreateWindow { name, command } = &cmd {
+            assert!(name.is_none());
+            assert_eq!(command.as_deref(), Some("vim"));
+        } else {
+            panic!("Expected CreateWindow variant");
+        }
+    }
+
+    // =========================================================================
+    // Tests: KillWindow command
+    // =========================================================================
+
+    #[test]
+    fn kill_window_construction() {
+        let cmd = IpcCommand::KillWindow { target: 3 };
+        if let IpcCommand::KillWindow { target } = &cmd {
+            assert_eq!(*target, 3);
+        } else {
+            panic!("Expected KillWindow variant");
+        }
+    }
+
+    #[test]
+    fn kill_window_target_zero() {
+        let cmd = IpcCommand::KillWindow { target: 0 };
+        if let IpcCommand::KillWindow { target } = &cmd {
+            assert_eq!(*target, 0);
+        } else {
+            panic!("Expected KillWindow variant");
+        }
+    }
+
+    // =========================================================================
+    // Tests: SelectWindow command
+    // =========================================================================
+
+    #[test]
+    fn select_window_construction() {
+        let cmd = IpcCommand::SelectWindow { target: 7 };
+        if let IpcCommand::SelectWindow { target } = &cmd {
+            assert_eq!(*target, 7);
+        } else {
+            panic!("Expected SelectWindow variant");
+        }
+    }
+
+    // =========================================================================
+    // Tests: RenameWindow command
+    // =========================================================================
+
+    #[test]
+    fn rename_window_construction() {
+        let cmd = IpcCommand::RenameWindow {
+            target: 2,
+            name: "new-name".to_string(),
+        };
+        if let IpcCommand::RenameWindow { target, name } = &cmd {
+            assert_eq!(*target, 2);
+            assert_eq!(name, "new-name");
+        } else {
+            panic!("Expected RenameWindow variant");
+        }
+    }
+
+    #[test]
+    fn rename_window_with_empty_name() {
+        let cmd = IpcCommand::RenameWindow {
+            target: 1,
+            name: String::new(),
+        };
+        if let IpcCommand::RenameWindow { target, name } = &cmd {
+            assert_eq!(*target, 1);
+            assert!(name.is_empty());
+        } else {
+            panic!("Expected RenameWindow variant");
+        }
+    }
+
+    // =========================================================================
+    // Tests: CreateWindow response data
+    // =========================================================================
+
+    #[test]
+    fn create_window_response_data_construction() {
+        let data = IpcResponseData::CreateWindow { id: 42 };
+        if let IpcResponseData::CreateWindow { id } = &data {
+            assert_eq!(*id, 42);
+        } else {
+            panic!("Expected CreateWindow response data variant");
+        }
+    }
+
+    #[test]
+    fn create_window_response_data_zero_id() {
+        let data = IpcResponseData::CreateWindow { id: 0 };
+        if let IpcResponseData::CreateWindow { id } = &data {
+            assert_eq!(*id, 0);
+        } else {
+            panic!("Expected CreateWindow response data variant");
+        }
+    }
+
+    #[test]
+    fn create_window_response_wrapped_in_ok_with_data() {
+        let resp = IpcResponse::OkWithData(IpcResponseData::CreateWindow { id: 5 });
+        if let IpcResponse::OkWithData(IpcResponseData::CreateWindow { id }) = &resp {
+            assert_eq!(*id, 5);
+        } else {
+            panic!("Expected OkWithData(CreateWindow) variant");
+        }
+    }
+
+    // =========================================================================
+    // Tests: New variant discrimination
+    // =========================================================================
+
+    #[test]
+    fn create_window_not_equal_to_list_windows() {
+        let a = IpcCommand::CreateWindow {
+            name: None,
+            command: None,
+        };
+        let b = IpcCommand::ListWindows;
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn kill_window_not_equal_to_select_window() {
+        let a = IpcCommand::KillWindow { target: 1 };
+        let b = IpcCommand::SelectWindow { target: 1 };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn rename_window_different_targets_not_equal() {
+        let a = IpcCommand::RenameWindow {
+            target: 1,
+            name: "same".to_string(),
+        };
+        let b = IpcCommand::RenameWindow {
+            target: 2,
+            name: "same".to_string(),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn rename_window_different_names_not_equal() {
+        let a = IpcCommand::RenameWindow {
+            target: 1,
+            name: "alpha".to_string(),
+        };
+        let b = IpcCommand::RenameWindow {
+            target: 1,
+            name: "beta".to_string(),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn create_window_clone_equals_original() {
+        let original = IpcCommand::CreateWindow {
+            name: Some("test".to_string()),
+            command: Some("bash".to_string()),
+        };
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn create_window_response_clone_equals_original() {
+        let original = IpcResponseData::CreateWindow { id: 99 };
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn create_window_debug_includes_variant_name() {
+        let cmd = IpcCommand::CreateWindow {
+            name: Some("dbg-test".to_string()),
+            command: None,
+        };
+        let debug = format!("{:?}", cmd);
+        assert!(debug.contains("CreateWindow"));
+        assert!(debug.contains("dbg-test"));
+    }
+
+    #[test]
+    fn kill_window_debug_includes_variant_name() {
+        let cmd = IpcCommand::KillWindow { target: 10 };
+        let debug = format!("{:?}", cmd);
+        assert!(debug.contains("KillWindow"));
+        assert!(debug.contains("10"));
+    }
+
+    #[test]
+    fn select_window_debug_includes_variant_name() {
+        let cmd = IpcCommand::SelectWindow { target: 4 };
+        let debug = format!("{:?}", cmd);
+        assert!(debug.contains("SelectWindow"));
+        assert!(debug.contains("4"));
+    }
+
+    #[test]
+    fn rename_window_debug_includes_variant_name() {
+        let cmd = IpcCommand::RenameWindow {
+            target: 5,
+            name: "renamed".to_string(),
+        };
+        let debug = format!("{:?}", cmd);
+        assert!(debug.contains("RenameWindow"));
+        assert!(debug.contains("renamed"));
+    }
+
+    #[test]
+    fn create_window_response_data_not_equal_to_buffer_data() {
+        let a = IpcResponseData::CreateWindow { id: 1 };
+        let b = IpcResponseData::Buffer { text: None };
         assert_ne!(a, b);
     }
 }

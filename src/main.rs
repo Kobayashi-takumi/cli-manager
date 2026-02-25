@@ -10,13 +10,17 @@ use crate::usecase::terminal_usecase::TerminalUsecase;
 use crate::interface_adapter::controller::tui_controller::TuiController;
 use crate::infrastructure::tui::app_runner;
 use crate::infrastructure::ipc::UnixSocketServer;
+use crate::infrastructure::ipc::socket_discovery;
 use crate::interface_adapter::port::IpcPort;
 
 fn main() -> anyhow::Result<()> {
-    // Check for `ctl` subcommand first
+    // Check for subcommands first
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 2 && args[1] == "ctl" {
         crate::infrastructure::ipc::cli_client::run(&args);
+    }
+    if args.len() >= 2 && args[1] == "mcp-server" {
+        crate::infrastructure::mcp::mcp_server::run();
     }
 
     let cwd = std::env::current_dir()?;
@@ -36,6 +40,10 @@ fn main() -> anyhow::Result<()> {
         std::env::set_var("CLI_MANAGER_SOCK", ipc_server.socket_path());
     }
 
+    // Write socket path to discovery file (~/.cli-manager/socket)
+    // so external tools can find the IPC socket without env var
+    let _ = socket_discovery::write_socket_path(ipc_server.socket_path());
+
     // Usecase (depends on port traits via generics)
     let usecase = TerminalUsecase::new(cwd, pty_adapter, screen_adapter);
 
@@ -44,6 +52,9 @@ fn main() -> anyhow::Result<()> {
 
     // Run TUI with IPC
     app_runner::run(controller, Some(Box::new(ipc_server)))?;
+
+    // Clean up discovery file on exit
+    socket_discovery::remove_socket_path();
 
     Ok(())
 }

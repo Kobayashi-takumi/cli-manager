@@ -916,6 +916,7 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
                     &command,
                     controller,
                     &mut yank_buffer,
+                    size,
                 );
                 ipc.send_response(conn_id, response);
             }
@@ -1030,6 +1031,7 @@ fn handle_ipc_command<P: PtyPort, S: ScreenPort>(
     command: &IpcCommand,
     controller: &mut TuiController<P, S>,
     yank_buffer: &mut Option<String>,
+    content_size: TerminalSize,
 ) -> IpcResponse {
     match command {
         IpcCommand::SendKeys { target, keys } => {
@@ -1172,6 +1174,33 @@ fn handle_ipc_command<P: PtyPort, S: ScreenPort>(
             IpcResponse::OkWithData(IpcResponseData::Buffer {
                 text: yank_buffer.clone(),
             })
+        }
+        IpcCommand::CreateWindow { name, command: _ } => {
+            match controller.usecase_mut().create_terminal(name.clone(), content_size) {
+                Ok(id) => IpcResponse::OkWithData(IpcResponseData::CreateWindow { id: id.value() }),
+                Err(e) => IpcResponse::Error(format!("{}", e)),
+            }
+        }
+        IpcCommand::KillWindow { target } => {
+            let tid = TerminalId::new(*target);
+            match controller.usecase_mut().close_by_id(tid) {
+                Ok(()) => IpcResponse::Ok,
+                Err(_e) => IpcResponse::Error(format!("terminal not found: {}", target)),
+            }
+        }
+        IpcCommand::SelectWindow { target } => {
+            let tid = TerminalId::new(*target);
+            match controller.usecase_mut().select_by_id(tid) {
+                Ok(()) => IpcResponse::Ok,
+                Err(_e) => IpcResponse::Error(format!("terminal not found: {}", target)),
+            }
+        }
+        IpcCommand::RenameWindow { target, name } => {
+            let tid = TerminalId::new(*target);
+            match controller.usecase_mut().rename_by_id(tid, name.clone()) {
+                Ok(()) => IpcResponse::Ok,
+                Err(_e) => IpcResponse::Error(format!("terminal not found: {}", target)),
+            }
         }
     }
 }
@@ -4835,7 +4864,7 @@ mod tests {
             target: id.value(),
             keys: vec!["hello".to_string(), "Enter".to_string()],
         };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert_eq!(response, IpcResponse::Ok);
 
         let written = &controller.usecase().pty_port().written;
@@ -4854,7 +4883,7 @@ mod tests {
             target: 999,
             keys: vec!["a".to_string()],
         };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert!(matches!(response, IpcResponse::Error(ref msg) if msg.contains("terminal not found")));
     }
 
@@ -4866,7 +4895,7 @@ mod tests {
             target: id.value(),
             keys: vec!["C-".to_string()],  // Invalid ctrl key
         };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert!(matches!(response, IpcResponse::Error(ref msg) if msg.contains("key parse error")));
     }
 
@@ -4878,7 +4907,7 @@ mod tests {
             target: id.value(),
             keys: vec![],
         };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert_eq!(response, IpcResponse::Ok);
 
         let written = &controller.usecase().pty_port().written;
@@ -4900,7 +4929,7 @@ mod tests {
             target: id.value(),
             include_scrollback: false,
         };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
 
         if let IpcResponse::OkWithData(IpcResponseData::CapturePane {
             text,
@@ -4934,7 +4963,7 @@ mod tests {
             target: 999,
             include_scrollback: false,
         };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert!(matches!(response, IpcResponse::Error(ref msg) if msg.contains("terminal not found")));
     }
 
@@ -4946,7 +4975,7 @@ mod tests {
             target: id.value(),
             include_scrollback: false,
         };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
 
         if let IpcResponse::OkWithData(IpcResponseData::CapturePane { text, .. }) = &response {
             // Empty screen (all spaces) should result in empty text after trimming
@@ -4967,7 +4996,7 @@ mod tests {
             target: id.value(),
             include_scrollback: true,
         };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
 
         if let IpcResponse::OkWithData(IpcResponseData::CapturePane { text, .. }) = &response {
             assert!(text.contains("visible row"));
@@ -4989,7 +5018,7 @@ mod tests {
             target: id.value(),
             include_scrollback: false,
         };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
 
         if let IpcResponse::OkWithData(IpcResponseData::CapturePane { cwd, .. }) = &response {
             assert_eq!(cwd.as_deref(), Some("/home/user"));
@@ -5011,7 +5040,7 @@ mod tests {
             target: id.value(),
             include_scrollback: false,
         };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
 
         if let IpcResponse::OkWithData(IpcResponseData::CapturePane { cursor_row, cursor_col, .. }) = &response {
             assert_eq!(*cursor_row, 5);
@@ -5030,7 +5059,7 @@ mod tests {
         let mut controller = make_ipc_controller();
         let mut yank_buffer: Option<String> = None;
         let cmd = IpcCommand::ListWindows;
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
 
         if let IpcResponse::OkWithData(IpcResponseData::ListWindows { windows }) = &response {
             assert!(windows.is_empty());
@@ -5050,7 +5079,7 @@ mod tests {
 
         let mut yank_buffer: Option<String> = None;
         let cmd = IpcCommand::ListWindows;
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
 
         if let IpcResponse::OkWithData(IpcResponseData::ListWindows { windows }) = &response {
             assert_eq!(windows.len(), 2);
@@ -5081,7 +5110,7 @@ mod tests {
 
         let mut yank_buffer: Option<String> = None;
         let cmd = IpcCommand::ListWindows;
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
 
         if let IpcResponse::OkWithData(IpcResponseData::ListWindows { windows }) = &response {
             assert!(windows[0].is_active);
@@ -5104,7 +5133,7 @@ mod tests {
 
         let mut yank_buffer: Option<String> = None;
         let cmd = IpcCommand::ListWindows;
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
 
         if let IpcResponse::OkWithData(IpcResponseData::ListWindows { windows }) = &response {
             assert_eq!(windows[0].cwd.as_deref(), Some("/home/test"));
@@ -5123,7 +5152,7 @@ mod tests {
         // No dynamic cwd set -- should fall back to terminal's cwd (/tmp)
         let mut yank_buffer: Option<String> = None;
         let cmd = IpcCommand::ListWindows;
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
 
         if let IpcResponse::OkWithData(IpcResponseData::ListWindows { windows }) = &response {
             assert_eq!(windows[0].cwd.as_deref(), Some("/tmp"));
@@ -5141,7 +5170,7 @@ mod tests {
         let (mut controller, id) = make_ipc_controller_with_terminal();
         let mut yank_buffer: Option<String> = Some("pasted text".to_string());
         let cmd = IpcCommand::PasteBuffer { target: id.value() };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert_eq!(response, IpcResponse::Ok);
 
         let written = &controller.usecase().pty_port().written;
@@ -5154,7 +5183,7 @@ mod tests {
         let (mut controller, id) = make_ipc_controller_with_terminal();
         let mut yank_buffer: Option<String> = None;
         let cmd = IpcCommand::PasteBuffer { target: id.value() };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert!(matches!(response, IpcResponse::Error(ref msg) if msg.contains("buffer is empty")));
     }
 
@@ -5163,7 +5192,7 @@ mod tests {
         let mut controller = make_ipc_controller();
         let mut yank_buffer: Option<String> = Some("text".to_string());
         let cmd = IpcCommand::PasteBuffer { target: 999 };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert!(matches!(response, IpcResponse::Error(ref msg) if msg.contains("terminal not found")));
     }
 
@@ -5176,7 +5205,7 @@ mod tests {
 
         let mut yank_buffer: Option<String> = Some("data".to_string());
         let cmd = IpcCommand::PasteBuffer { target: id.value() };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert_eq!(response, IpcResponse::Ok);
 
         let written = &controller.usecase().pty_port().written;
@@ -5195,7 +5224,7 @@ mod tests {
         // Bracketed paste defaults to false
         let mut yank_buffer: Option<String> = Some("raw".to_string());
         let cmd = IpcCommand::PasteBuffer { target: id.value() };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert_eq!(response, IpcResponse::Ok);
 
         let written = &controller.usecase().pty_port().written;
@@ -5211,7 +5240,7 @@ mod tests {
         let mut controller = make_ipc_controller();
         let mut yank_buffer: Option<String> = None;
         let cmd = IpcCommand::SetBuffer { text: "hello world".to_string() };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert_eq!(response, IpcResponse::Ok);
         assert_eq!(yank_buffer.as_deref(), Some("hello world"));
     }
@@ -5221,7 +5250,7 @@ mod tests {
         let mut controller = make_ipc_controller();
         let mut yank_buffer: Option<String> = None;
         let cmd = IpcCommand::SetBuffer { text: String::new() };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert_eq!(response, IpcResponse::Ok);
         assert_eq!(yank_buffer.as_deref(), Some(""));
     }
@@ -5231,7 +5260,7 @@ mod tests {
         let mut controller = make_ipc_controller();
         let mut yank_buffer: Option<String> = Some("old".to_string());
         let cmd = IpcCommand::SetBuffer { text: "new".to_string() };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert_eq!(response, IpcResponse::Ok);
         assert_eq!(yank_buffer.as_deref(), Some("new"));
     }
@@ -5241,7 +5270,7 @@ mod tests {
         let mut controller = make_ipc_controller();
         let mut yank_buffer: Option<String> = Some("stored text".to_string());
         let cmd = IpcCommand::ShowBuffer;
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
 
         if let IpcResponse::OkWithData(IpcResponseData::Buffer { text }) = &response {
             assert_eq!(text.as_deref(), Some("stored text"));
@@ -5255,7 +5284,7 @@ mod tests {
         let mut controller = make_ipc_controller();
         let mut yank_buffer: Option<String> = None;
         let cmd = IpcCommand::ShowBuffer;
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
 
         if let IpcResponse::OkWithData(IpcResponseData::Buffer { text }) = &response {
             assert!(text.is_none());
@@ -5271,12 +5300,12 @@ mod tests {
 
         // Set
         let cmd = IpcCommand::SetBuffer { text: "roundtrip".to_string() };
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert_eq!(response, IpcResponse::Ok);
 
         // Show
         let cmd = IpcCommand::ShowBuffer;
-        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         if let IpcResponse::OkWithData(IpcResponseData::Buffer { text }) = &response {
             assert_eq!(text.as_deref(), Some("roundtrip"));
         } else {
@@ -5289,7 +5318,7 @@ mod tests {
         let mut controller = make_ipc_controller();
         let mut yank_buffer: Option<String> = Some("existing".to_string());
         let cmd = IpcCommand::ShowBuffer;
-        let _ = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer);
+        let _ = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert_eq!(yank_buffer.as_deref(), Some("existing"));
     }
 
@@ -5368,5 +5397,112 @@ mod tests {
     fn visual_character_mode_h_at_col_zero_saturates() {
         let col = apply_visual_key_col_change(SelectionMode::Character, 'h', 0, 80);
         assert_eq!(col, 0, "Character mode 'h' at col 0 should saturate at 0");
+    }
+
+    // =========================================================================
+    // CreateWindow / KillWindow / SelectWindow / RenameWindow IPC tests (#128)
+    // =========================================================================
+
+    #[test]
+    fn ipc_create_window_returns_id() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::CreateWindow { name: None, command: None };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
+        match response {
+            IpcResponse::OkWithData(IpcResponseData::CreateWindow { id }) => {
+                assert!(id > 0);
+            }
+            other => panic!("Expected OkWithData(CreateWindow), got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ipc_create_window_with_name() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::CreateWindow { name: Some("my-term".to_string()), command: None };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
+        match response {
+            IpcResponse::OkWithData(IpcResponseData::CreateWindow { id }) => {
+                let t = controller.usecase().get_terminal_by_id(TerminalId::new(id));
+                assert!(t.is_some());
+                assert_eq!(t.unwrap().name(), "my-term");
+            }
+            other => panic!("Expected OkWithData(CreateWindow), got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ipc_kill_window_success() {
+        let (mut controller, id) = make_ipc_controller_with_terminal();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::KillWindow { target: id.value() };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
+        assert_eq!(response, IpcResponse::Ok);
+        assert!(controller.usecase().get_terminal_by_id(id).is_none());
+    }
+
+    #[test]
+    fn ipc_kill_window_not_found() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::KillWindow { target: 999 };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
+        match response {
+            IpcResponse::Error(msg) => assert!(msg.contains("terminal not found"), "got: {msg}"),
+            other => panic!("Expected Error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ipc_select_window_success() {
+        let (mut controller, id1) = make_ipc_controller_with_terminal();
+        let mut yank_buffer: Option<String> = None;
+        // Create a second terminal
+        let id2 = controller.usecase_mut()
+            .create_terminal(Some("second".to_string()), TerminalSize::new(80, 24))
+            .unwrap();
+        // Active is now id2 (last created)
+        assert_eq!(controller.usecase().get_active_terminal().unwrap().id(), id2);
+        // Select id1
+        let cmd = IpcCommand::SelectWindow { target: id1.value() };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
+        assert_eq!(response, IpcResponse::Ok);
+        assert_eq!(controller.usecase().get_active_terminal().unwrap().id(), id1);
+    }
+
+    #[test]
+    fn ipc_select_window_not_found() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::SelectWindow { target: 999 };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
+        match response {
+            IpcResponse::Error(msg) => assert!(msg.contains("terminal not found"), "got: {msg}"),
+            other => panic!("Expected Error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ipc_rename_window_success() {
+        let (mut controller, id) = make_ipc_controller_with_terminal();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::RenameWindow { target: id.value(), name: "new-name".to_string() };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
+        assert_eq!(response, IpcResponse::Ok);
+        assert_eq!(controller.usecase().get_terminal_by_id(id).unwrap().name(), "new-name");
+    }
+
+    #[test]
+    fn ipc_rename_window_not_found() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::RenameWindow { target: 999, name: "foo".to_string() };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
+        match response {
+            IpcResponse::Error(msg) => assert!(msg.contains("terminal not found"), "got: {msg}"),
+            other => panic!("Expected Error, got: {:?}", other),
+        }
     }
 }
