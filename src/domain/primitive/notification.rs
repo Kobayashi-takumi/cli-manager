@@ -10,6 +10,8 @@ pub enum NotificationEvent {
     Osc9 { message: String },
     /// OSC 777 notification (rxvt-compatible).
     Osc777 { title: String, body: String },
+    /// External notification injected via API or IPC.
+    External { title: String, body: String },
 }
 
 impl NotificationEvent {
@@ -19,6 +21,7 @@ impl NotificationEvent {
             Self::Bell => "Bell",
             Self::Osc9 { message } => message.as_str(),
             Self::Osc777 { title, .. } => title.as_str(),
+            Self::External { body, .. } => body.as_str(),
         }
     }
 
@@ -28,6 +31,7 @@ impl NotificationEvent {
             Self::Bell => ("CLI Manager", "Task completed (bell)"),
             Self::Osc9 { message } => ("CLI Manager", message.as_str()),
             Self::Osc777 { title, body } => (title.as_str(), body.as_str()),
+            Self::External { title, body } => (title.as_str(), body.as_str()),
         }
     }
 }
@@ -128,6 +132,108 @@ mod tests {
         let (title, body) = event.to_notification_parts();
         assert_eq!(title, "");
         assert_eq!(body, "");
+    }
+
+    // =========================================================================
+    // Tests: External variant
+    // =========================================================================
+
+    #[test]
+    fn external_can_be_constructed_with_title_and_body() {
+        let event = NotificationEvent::External {
+            title: "Agent".to_string(),
+            body: "Query finished".to_string(),
+        };
+        // Verify fields are accessible via pattern matching.
+        if let NotificationEvent::External { title, body } = &event {
+            assert_eq!(title, "Agent");
+            assert_eq!(body, "Query finished");
+        } else {
+            panic!("Expected External variant");
+        }
+    }
+
+    #[test]
+    fn external_summary_returns_body() {
+        let event = NotificationEvent::External {
+            title: "Agent".to_string(),
+            body: "Query finished".to_string(),
+        };
+        assert_eq!(event.summary(), "Query finished");
+    }
+
+    #[test]
+    fn external_notification_parts_returns_title_and_body() {
+        let event = NotificationEvent::External {
+            title: "Agent".to_string(),
+            body: "Query finished".to_string(),
+        };
+        let (title, body) = event.to_notification_parts();
+        assert_eq!(title, "Agent");
+        assert_eq!(body, "Query finished");
+    }
+
+    #[test]
+    fn external_empty_title_and_body() {
+        let event = NotificationEvent::External {
+            title: String::new(),
+            body: String::new(),
+        };
+        assert_eq!(event.summary(), "");
+        let (title, body) = event.to_notification_parts();
+        assert_eq!(title, "");
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn external_different_titles_are_not_equal() {
+        let a = NotificationEvent::External {
+            title: "A".to_string(),
+            body: "same".to_string(),
+        };
+        let b = NotificationEvent::External {
+            title: "B".to_string(),
+            body: "same".to_string(),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn external_different_bodies_are_not_equal() {
+        let a = NotificationEvent::External {
+            title: "same".to_string(),
+            body: "X".to_string(),
+        };
+        let b = NotificationEvent::External {
+            title: "same".to_string(),
+            body: "Y".to_string(),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn external_is_not_equal_to_osc777_with_same_fields() {
+        let external = NotificationEvent::External {
+            title: "T".to_string(),
+            body: "B".to_string(),
+        };
+        let osc777 = NotificationEvent::Osc777 {
+            title: "T".to_string(),
+            body: "B".to_string(),
+        };
+        assert_ne!(external, osc777);
+    }
+
+    #[test]
+    fn external_debug_format_includes_variant_name() {
+        let event = NotificationEvent::External {
+            title: "Test".to_string(),
+            body: "debug".to_string(),
+        };
+        let debug = format!("{:?}", event);
+        assert!(debug.contains("External"));
+        assert!(debug.contains("Test"));
+        assert!(debug.contains("debug"));
     }
 
     // =========================================================================

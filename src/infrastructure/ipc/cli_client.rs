@@ -176,6 +176,45 @@ fn build_request(subcommand: &str, args: &[String]) -> Result<String, String> {
                     .to_string(),
             )
         }
+        "notify" => {
+            let mut title: Option<String> = None;
+            let mut body: Option<String> = None;
+            let mut i = 0;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--title" => {
+                        if i + 1 < args.len() {
+                            title = Some(args[i + 1].clone());
+                            i += 2;
+                        } else {
+                            return Err("--title requires a value".to_string());
+                        }
+                    }
+                    "--body" => {
+                        if i + 1 < args.len() {
+                            body = Some(args[i + 1].clone());
+                            i += 2;
+                        } else {
+                            return Err("--body requires a value".to_string());
+                        }
+                    }
+                    other => {
+                        return Err(format!("unknown option: {}", other));
+                    }
+                }
+            }
+            let body = match body {
+                Some(b) => b,
+                None => {
+                    return Err("--body is required for notify".to_string());
+                }
+            };
+            let mut obj = serde_json::json!({"cmd": "notify", "body": body});
+            if let Some(t) = title {
+                obj["title"] = serde_json::json!(t);
+            }
+            Ok(obj.to_string())
+        }
         _ => Err(format!("unknown subcommand: {}", subcommand)),
     }
 }
@@ -256,6 +295,7 @@ fn print_usage() {
     eprintln!("  kill-window -t <id>               Kill a terminal");
     eprintln!("  select-window -t <id>             Select (focus) a terminal");
     eprintln!("  rename-window -t <id> --name <n>  Rename a terminal");
+    eprintln!("  notify --body <b> [--title <t>]   Send a desktop notification");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --raw    Output raw JSON response");
@@ -797,6 +837,76 @@ mod tests {
         assert_eq!(v["cmd"], "rename-window");
         assert_eq!(v["target"], 1);
         assert_eq!(v["name"], "renamed");
+    }
+
+    // ========================================================================
+    // Tests: build_request — notify
+    // ========================================================================
+
+    #[test]
+    fn build_request_notify_with_title_and_body() {
+        let args = s(&["--title", "Test", "--body", "Hello"]);
+        let json_str = build_request("notify", &args).unwrap();
+        let v: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["cmd"], "notify");
+        assert_eq!(v["title"], "Test");
+        assert_eq!(v["body"], "Hello");
+    }
+
+    #[test]
+    fn build_request_notify_body_only() {
+        let args = s(&["--body", "Hello"]);
+        let json_str = build_request("notify", &args).unwrap();
+        let v: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["cmd"], "notify");
+        assert_eq!(v["body"], "Hello");
+        // title should not be present
+        assert!(v.get("title").is_none());
+    }
+
+    #[test]
+    fn build_request_notify_missing_body() {
+        let args = s(&["--title", "Test"]);
+        let err = build_request("notify", &args).unwrap_err();
+        assert!(err.contains("--body is required"), "got: {err}");
+    }
+
+    #[test]
+    fn build_request_notify_empty_args() {
+        let args = s(&[]);
+        let err = build_request("notify", &args).unwrap_err();
+        assert!(err.contains("--body is required"), "got: {err}");
+    }
+
+    #[test]
+    fn build_request_notify_title_missing_value() {
+        let args = s(&["--title"]);
+        let err = build_request("notify", &args).unwrap_err();
+        assert!(err.contains("--title requires a value"), "got: {err}");
+    }
+
+    #[test]
+    fn build_request_notify_body_missing_value() {
+        let args = s(&["--body"]);
+        let err = build_request("notify", &args).unwrap_err();
+        assert!(err.contains("--body requires a value"), "got: {err}");
+    }
+
+    #[test]
+    fn build_request_notify_unknown_option() {
+        let args = s(&["--body", "Hello", "--foo"]);
+        let err = build_request("notify", &args).unwrap_err();
+        assert!(err.contains("unknown option: --foo"), "got: {err}");
+    }
+
+    #[test]
+    fn build_request_notify_roundtrip_with_protocol() {
+        let args = s(&["--title", "Alert", "--body", "Something happened"]);
+        let json_str = build_request("notify", &args).unwrap();
+        let v: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["cmd"], "notify");
+        assert_eq!(v["title"], "Alert");
+        assert_eq!(v["body"], "Something happened");
     }
 
     #[test]

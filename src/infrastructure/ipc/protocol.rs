@@ -20,6 +20,8 @@ struct RawRequest {
     text: Option<String>,
     name: Option<String>,
     command: Option<String>,
+    title: Option<String>,
+    body: Option<String>,
 }
 
 // ============================================================================
@@ -148,6 +150,14 @@ pub fn parse_command(json: &str) -> Result<IpcCommand, String> {
                 .name
                 .ok_or_else(|| "missing field: name".to_string())?;
             Ok(IpcCommand::RenameWindow { target, name })
+        }
+        "notify" => {
+            let body = raw.body
+                .ok_or_else(|| "missing field: body".to_string())?;
+            Ok(IpcCommand::Notify {
+                title: raw.title,
+                body,
+            })
         }
         other => Err(format!("unknown command: {other}")),
     }
@@ -708,5 +718,49 @@ mod tests {
         let v: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["ok"], true);
         assert_eq!(v["data"]["id"], 3);
+    }
+
+    // ========================================================================
+    // Tests: parse_command — notify command
+    // ========================================================================
+
+    #[test]
+    fn parse_notify_with_title_and_body() {
+        let json = r#"{"cmd": "notify", "title": "Claude Code", "body": "Response complete"}"#;
+        let cmd = parse_command(json).unwrap();
+        assert_eq!(
+            cmd,
+            IpcCommand::Notify {
+                title: Some("Claude Code".to_string()),
+                body: "Response complete".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_notify_without_title() {
+        let json = r#"{"cmd": "notify", "body": "Task done"}"#;
+        let cmd = parse_command(json).unwrap();
+        assert_eq!(
+            cmd,
+            IpcCommand::Notify {
+                title: None,
+                body: "Task done".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_notify_missing_body_returns_error() {
+        let json = r#"{"cmd": "notify", "title": "Test"}"#;
+        let err = parse_command(json).unwrap_err();
+        assert!(err.contains("missing field: body"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_notify_missing_body_no_title_returns_error() {
+        let json = r#"{"cmd": "notify"}"#;
+        let err = parse_command(json).unwrap_err();
+        assert!(err.contains("missing field: body"), "got: {err}");
     }
 }

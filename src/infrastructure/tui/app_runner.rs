@@ -21,7 +21,7 @@ fn char_to_byte_index(s: &str, char_pos: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-use crate::domain::primitive::{Cell, CursorPos, CursorStyle, IpcCommand, IpcResponse, IpcResponseData, SearchMatch, TerminalId, TerminalSize, WindowInfo};
+use crate::domain::primitive::{Cell, CursorPos, CursorStyle, IpcCommand, IpcResponse, IpcResponseData, NotificationEvent, SearchMatch, TerminalId, TerminalSize, WindowInfo};
 use crate::infrastructure::notification::MacOsNotifier;
 use crate::infrastructure::tui::input::{InputHandler, InputMode};
 use crate::infrastructure::tui::fuzzy_matcher;
@@ -912,6 +912,14 @@ fn main_loop<P: PtyPort, S: ScreenPort>(
         if let Some(ipc) = ipc_port.as_mut() {
             let commands = ipc.poll_commands();
             for (conn_id, command) in commands {
+                // Handle notify command: send desktop notification via notifier
+                if let IpcCommand::Notify { title, body } = &command {
+                    let event = NotificationEvent::External {
+                        title: title.clone().unwrap_or_else(|| "CLI Manager".to_string()),
+                        body: body.clone(),
+                    };
+                    notifier.notify("external", &event);
+                }
                 let response = handle_ipc_command(
                     &command,
                     controller,
@@ -1201,6 +1209,10 @@ fn handle_ipc_command<P: PtyPort, S: ScreenPort>(
                 Ok(()) => IpcResponse::Ok,
                 Err(_e) => IpcResponse::Error(format!("terminal not found: {}", target)),
             }
+        }
+        IpcCommand::Notify { .. } => {
+            // Notification sending is handled at the call site in main_loop
+            IpcResponse::Ok
         }
     }
 }
@@ -5504,5 +5516,45 @@ mod tests {
             IpcResponse::Error(msg) => assert!(msg.contains("terminal not found"), "got: {msg}"),
             other => panic!("Expected Error, got: {:?}", other),
         }
+    }
+
+    // =========================================================================
+    // Tests: IPC notify command
+    // =========================================================================
+
+    #[test]
+    fn ipc_notify_with_title_returns_ok() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::Notify {
+            title: Some("Claude Code".to_string()),
+            body: "Response complete".to_string(),
+        };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
+        assert_eq!(response, IpcResponse::Ok);
+    }
+
+    #[test]
+    fn ipc_notify_without_title_returns_ok() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::Notify {
+            title: None,
+            body: "Task done".to_string(),
+        };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
+        assert_eq!(response, IpcResponse::Ok);
+    }
+
+    #[test]
+    fn ipc_notify_empty_body_returns_ok() {
+        let mut controller = make_ipc_controller();
+        let mut yank_buffer: Option<String> = None;
+        let cmd = IpcCommand::Notify {
+            title: None,
+            body: String::new(),
+        };
+        let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
+        assert_eq!(response, IpcResponse::Ok);
     }
 }

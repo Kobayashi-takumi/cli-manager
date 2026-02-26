@@ -136,6 +136,17 @@ fn build_ipc_command(tool_name: &str, arguments: &Value) -> Result<String, (Valu
                 .ok_or_else(|| missing_param_error("target"))?;
             Ok(json!({"cmd": "paste-buffer", "target": target}).to_string())
         }
+        "notify" => {
+            let body = arguments
+                .get("body")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| missing_param_error("body"))?;
+            let mut cmd = json!({"cmd": "notify", "body": body});
+            if let Some(title) = arguments.get("title").and_then(|v| v.as_str()) {
+                cmd["title"] = json!(title);
+            }
+            Ok(cmd.to_string())
+        }
         _ => Err((
             json!([{"type": "text", "text": format!("Unknown tool: {}", tool_name)}]),
             true,
@@ -498,6 +509,62 @@ mod tests {
         assert!(is_error);
         let text = content[0]["text"].as_str().unwrap();
         assert!(text.contains("Missing required parameter: text"), "got: {text}");
+    }
+
+    // ========================================================================
+    // Tests: handle_tool_call — connection failure (no running instance)
+    // ========================================================================
+
+    // ========================================================================
+    // Tests: build_ipc_command — notify
+    // ========================================================================
+
+    #[test]
+    fn build_notify_with_title_and_body() {
+        let result = build_ipc_command("notify", &json!({"title": "Build", "body": "Done"})).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["cmd"], "notify");
+        assert_eq!(v["body"], "Done");
+        assert_eq!(v["title"], "Build");
+    }
+
+    #[test]
+    fn build_notify_body_only() {
+        let result = build_ipc_command("notify", &json!({"body": "Task complete"})).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["cmd"], "notify");
+        assert_eq!(v["body"], "Task complete");
+        assert!(v.get("title").is_none());
+    }
+
+    #[test]
+    fn build_notify_missing_body() {
+        let result = build_ipc_command("notify", &json!({"title": "Test"}));
+        let (content, is_error) = result.unwrap_err();
+        assert!(is_error);
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(text.contains("Missing required parameter: body"), "got: {text}");
+    }
+
+    #[test]
+    fn build_notify_empty_args() {
+        let result = build_ipc_command("notify", &json!({}));
+        let (content, is_error) = result.unwrap_err();
+        assert!(is_error);
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(text.contains("Missing required parameter: body"), "got: {text}");
+    }
+
+    // ========================================================================
+    // Tests: handle_tool_call — notify parameter validation
+    // ========================================================================
+
+    #[test]
+    fn handle_notify_no_body() {
+        let (content, is_error) = handle_tool_call("notify", &json!({}));
+        assert!(is_error);
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(text.contains("Missing required parameter: body"), "got: {text}");
     }
 
     // ========================================================================

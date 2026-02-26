@@ -149,6 +149,24 @@ pub fn get_tool_definitions() -> Vec<Value> {
                 "required": ["target"]
             }
         }),
+        json!({
+            "name": "notify",
+            "description": "Send a desktop notification through CLI Manager",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Notification title (default: 'CLI Manager')"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Notification body text"
+                    }
+                },
+                "required": ["body"]
+            }
+        }),
     ]
 }
 
@@ -161,9 +179,9 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn tool_definitions_returns_10_tools() {
+    fn tool_definitions_returns_11_tools() {
         let tools = get_tool_definitions();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
     }
 
     // ========================================================================
@@ -257,6 +275,7 @@ mod tests {
         assert!(names.contains(&"buffer_get"));
         assert!(names.contains(&"buffer_set"));
         assert!(names.contains(&"buffer_paste"));
+        assert!(names.contains(&"notify"));
     }
 
     #[test]
@@ -362,6 +381,22 @@ mod tests {
         let required = tool["inputSchema"]["required"].as_array().unwrap();
         assert_eq!(required.len(), 1);
         assert_eq!(required[0], "target");
+    }
+
+    #[test]
+    fn notify_requires_body() {
+        let tool = find_tool("notify");
+        let required = tool["inputSchema"]["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0], "body");
+    }
+
+    #[test]
+    fn notify_has_title_and_body_properties() {
+        let tool = find_tool("notify");
+        let props = &tool["inputSchema"]["properties"];
+        assert_eq!(props["title"]["type"], "string");
+        assert_eq!(props["body"]["type"], "string");
     }
 
     // ========================================================================

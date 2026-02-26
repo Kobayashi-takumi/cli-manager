@@ -27,6 +27,8 @@ pub enum IpcCommand {
     SelectWindow { target: u32 },
     /// Rename a terminal window.
     RenameWindow { target: u32, name: String },
+    /// Send a desktop notification via CLI Manager.
+    Notify { title: Option<String>, body: String },
 }
 
 /// IPC response types returned to external clients.
@@ -913,6 +915,96 @@ mod tests {
     fn create_window_response_data_not_equal_to_buffer_data() {
         let a = IpcResponseData::CreateWindow { id: 1 };
         let b = IpcResponseData::Buffer { text: None };
+        assert_ne!(a, b);
+    }
+
+    // =========================================================================
+    // Tests: Notify command
+    // =========================================================================
+
+    #[test]
+    fn notify_with_title_and_body() {
+        let cmd = IpcCommand::Notify {
+            title: Some("Claude Code".to_string()),
+            body: "Response complete".to_string(),
+        };
+        if let IpcCommand::Notify { title, body } = &cmd {
+            assert_eq!(title.as_deref(), Some("Claude Code"));
+            assert_eq!(body, "Response complete");
+        } else {
+            panic!("Expected Notify variant");
+        }
+    }
+
+    #[test]
+    fn notify_without_title() {
+        let cmd = IpcCommand::Notify {
+            title: None,
+            body: "Task done".to_string(),
+        };
+        if let IpcCommand::Notify { title, body } = &cmd {
+            assert!(title.is_none());
+            assert_eq!(body, "Task done");
+        } else {
+            panic!("Expected Notify variant");
+        }
+    }
+
+    #[test]
+    fn notify_clone_equals_original() {
+        let original = IpcCommand::Notify {
+            title: Some("Test".to_string()),
+            body: "Hello".to_string(),
+        };
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn notify_debug_includes_variant_name() {
+        let cmd = IpcCommand::Notify {
+            title: Some("Debug".to_string()),
+            body: "test".to_string(),
+        };
+        let debug = format!("{:?}", cmd);
+        assert!(debug.contains("Notify"));
+        assert!(debug.contains("Debug"));
+        assert!(debug.contains("test"));
+    }
+
+    #[test]
+    fn notify_not_equal_to_other_variants() {
+        let notify = IpcCommand::Notify {
+            title: None,
+            body: "msg".to_string(),
+        };
+        let list = IpcCommand::ListWindows;
+        assert_ne!(notify, list);
+    }
+
+    #[test]
+    fn notify_different_bodies_not_equal() {
+        let a = IpcCommand::Notify {
+            title: None,
+            body: "a".to_string(),
+        };
+        let b = IpcCommand::Notify {
+            title: None,
+            body: "b".to_string(),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn notify_different_titles_not_equal() {
+        let a = IpcCommand::Notify {
+            title: Some("X".to_string()),
+            body: "same".to_string(),
+        };
+        let b = IpcCommand::Notify {
+            title: Some("Y".to_string()),
+            body: "same".to_string(),
+        };
         assert_ne!(a, b);
     }
 }
