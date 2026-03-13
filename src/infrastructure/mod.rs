@@ -1,3 +1,4 @@
+pub mod clipboard;
 pub mod ipc;
 pub mod mcp;
 pub mod notification;

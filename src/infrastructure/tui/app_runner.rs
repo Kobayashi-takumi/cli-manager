@@ -66,6 +66,21 @@ fn active_scrollback_id<P: PtyPort, S: ScreenPort>(
     }
 }
 
+/// Compute the number of visible content rows for scrollback mode.
+///
+/// For MainTerminal: `size.rows` already has CWD bar subtracted (i.e. `main_pane.height - 1`),
+/// but scrollback rendering also uses borders (top + bottom = 2) and a status bar (1),
+/// so we subtract 3 more to get the actual content rows.
+///
+/// For MiniTerminal: uses `MINI_TERMINAL_HEIGHT - 4` (borders + CWD + status).
+fn scrollback_content_rows(scrollback_target: &Option<ScrollbackTarget>, size: TerminalSize) -> usize {
+    if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
+        (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
+    } else {
+        (size.rows as usize).saturating_sub(3)
+    }
+}
+
 /// Tracks the state of the mini terminal (footer-style quick shell).
 struct MiniTerminalState {
     visible: bool,
@@ -1417,11 +1432,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
         AppAction::ScrollbackUp(n) => {
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
                 let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
-                let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
-                    (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
-                } else {
-                    size.rows as usize
-                };
+                let screen_rows = scrollback_content_rows(scrollback_target, size);
                 // Move cursor up (clamped to row 0)
                 scrollback_cursor.row = scrollback_cursor.row.saturating_sub(n);
                 // Auto-scroll: if cursor is above visible window, scroll viewport up
@@ -1439,11 +1450,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
         AppAction::ScrollbackDown(n) => {
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
                 let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
-                let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
-                    (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
-                } else {
-                    size.rows as usize
-                };
+                let screen_rows = scrollback_content_rows(scrollback_target, size);
                 let total_rows = max_sb + screen_rows;
                 // Move cursor down (clamped to last row)
                 scrollback_cursor.row = (scrollback_cursor.row + n).min(total_rows.saturating_sub(1));
@@ -1464,15 +1471,11 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
         AppAction::ScrollbackPageUp => {
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
                 let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
-                let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
-                    (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
-                } else {
-                    size.rows as usize
-                };
+                let screen_rows = scrollback_content_rows(scrollback_target, size);
                 let page = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
                     (MINI_TERMINAL_HEIGHT as usize).saturating_sub(2) / 2
                 } else {
-                    (size.rows as usize) / 2
+                    (size.rows as usize).saturating_sub(3) / 2
                 };
                 // Move cursor up by page
                 scrollback_cursor.row = scrollback_cursor.row.saturating_sub(page);
@@ -1491,16 +1494,12 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
         AppAction::ScrollbackPageDown => {
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
                 let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
-                let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
-                    (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
-                } else {
-                    size.rows as usize
-                };
+                let screen_rows = scrollback_content_rows(scrollback_target, size);
                 let total_rows = max_sb + screen_rows;
                 let page = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
                     (MINI_TERMINAL_HEIGHT as usize).saturating_sub(2) / 2
                 } else {
-                    (size.rows as usize) / 2
+                    (size.rows as usize).saturating_sub(3) / 2
                 };
                 // Move cursor down by page (clamped to last row)
                 scrollback_cursor.row = (scrollback_cursor.row + page).min(total_rows.saturating_sub(1));
@@ -1530,11 +1529,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
         AppAction::ScrollbackBottom => {
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
                 let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
-                let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
-                    (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
-                } else {
-                    size.rows as usize
-                };
+                let screen_rows = scrollback_content_rows(scrollback_target, size);
                 let total_rows = max_sb + screen_rows;
                 // Move cursor to last row of buffer
                 scrollback_cursor.row = total_rows.saturating_sub(1);
@@ -1548,6 +1543,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                     if let Ok(cells) = controller.usecase().screen_port().get_cells(id) {
                         let text = extract_text_from_cells(cells, 0, cells.len(), None, None);
                         if !text.is_empty() {
+                            crate::infrastructure::clipboard::copy_to_clipboard(&text);
                             *yank_buffer = Some(text);
                             *yank_flash_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                         }
@@ -1563,6 +1559,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                     {
                         let text = extract_text_from_cells(&[row_cells], 0, 1, None, None);
                         if !text.is_empty() {
+                            crate::infrastructure::clipboard::copy_to_clipboard(&text);
                             *yank_buffer = Some(text);
                             *yank_flash_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                         }
@@ -1732,11 +1729,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
                     let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
                     let offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
                     let visible_start = max_sb.saturating_sub(offset);
-                    let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
-                        (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
-                    } else {
-                        size.rows as usize
-                    };
+                    let screen_rows = scrollback_content_rows(scrollback_target, size);
                     // Scrollback border takes 2 cols (left+right), so visible cols = size.cols - 2
                     let visible_cols = (size.cols as usize).saturating_sub(2);
                     scrollback_cursor.col = visible_cols.saturating_sub(1);
@@ -1756,11 +1749,7 @@ fn handle_key_event<P: PtyPort, S: ScreenPort>(
             if let Some(id) = active_scrollback_id(scrollback_target, controller, mini_terminal) {
                 let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
                 let offset = controller.usecase().screen_port().get_scrollback_offset(id).unwrap_or(0);
-                let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
-                    (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
-                } else {
-                    size.rows as usize
-                };
+                let screen_rows = scrollback_content_rows(scrollback_target, size);
                 let total_rows = max_sb + screen_rows;
                 // Scrollback border takes 2 cols (left+right), so visible cols = size.cols - 2
                 let visible_cols = (size.cols as usize).saturating_sub(2);
@@ -1870,11 +1859,7 @@ fn handle_visual_key<P: PtyPort, S: ScreenPort>(
     };
 
     let max_sb = controller.usecase().screen_port().get_max_scrollback(id).unwrap_or(0);
-    let screen_rows = if *scrollback_target == Some(ScrollbackTarget::MiniTerminal) {
-        (MINI_TERMINAL_HEIGHT as usize).saturating_sub(4)
-    } else {
-        size.rows as usize
-    };
+    let screen_rows = scrollback_content_rows(scrollback_target, size);
     // Total rows = max_scrollback + screen_rows
     let total_rows = max_sb + screen_rows;
     // Get number of columns from cells
@@ -1949,6 +1934,7 @@ fn handle_visual_key<P: PtyPort, S: ScreenPort>(
                 }
             };
             if !text.is_empty() {
+                crate::infrastructure::clipboard::copy_to_clipboard(&text);
                 *yank_buffer = Some(text);
                 *yank_flash_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
             }
@@ -5556,5 +5542,55 @@ mod tests {
         };
         let response = handle_ipc_command(&cmd, &mut controller, &mut yank_buffer, TerminalSize::new(80, 24));
         assert_eq!(response, IpcResponse::Ok);
+    }
+
+    // === scrollback_content_rows tests ===
+
+    #[test]
+    fn scrollback_content_rows_main_terminal_subtracts_3() {
+        let target = Some(ScrollbackTarget::MainTerminal);
+        let size = TerminalSize::new(80, 24);
+        // size.rows = 24, subtract 3 (borders + status bar) = 21
+        assert_eq!(scrollback_content_rows(&target, size), 21);
+    }
+
+    #[test]
+    fn scrollback_content_rows_main_terminal_small_size() {
+        let target = Some(ScrollbackTarget::MainTerminal);
+        let size = TerminalSize::new(80, 4);
+        // size.rows = 4, subtract 3 = 1
+        assert_eq!(scrollback_content_rows(&target, size), 1);
+    }
+
+    #[test]
+    fn scrollback_content_rows_main_terminal_saturates_at_zero() {
+        let target = Some(ScrollbackTarget::MainTerminal);
+        let size = TerminalSize::new(80, 2);
+        // size.rows = 2, saturating_sub(3) = 0
+        assert_eq!(scrollback_content_rows(&target, size), 0);
+    }
+
+    #[test]
+    fn scrollback_content_rows_mini_terminal_subtracts_4() {
+        let target = Some(ScrollbackTarget::MiniTerminal);
+        let size = TerminalSize::new(80, 24);
+        // MINI_TERMINAL_HEIGHT = 10, subtract 4 = 6
+        assert_eq!(scrollback_content_rows(&target, size), 6);
+    }
+
+    #[test]
+    fn scrollback_content_rows_mini_terminal_ignores_size() {
+        let target = Some(ScrollbackTarget::MiniTerminal);
+        let size = TerminalSize::new(80, 100);
+        // Always uses MINI_TERMINAL_HEIGHT, not size.rows
+        assert_eq!(scrollback_content_rows(&target, size), 6);
+    }
+
+    #[test]
+    fn scrollback_content_rows_none_uses_main_terminal_formula() {
+        // When scrollback_target is None, treat as MainTerminal (fallback)
+        let target: Option<ScrollbackTarget> = None;
+        let size = TerminalSize::new(80, 30);
+        assert_eq!(scrollback_content_rows(&target, size), 27);
     }
 }

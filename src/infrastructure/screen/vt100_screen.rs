@@ -526,20 +526,31 @@ impl ScreenPort for Vt100ScreenAdapter {
         // Save the current scrollback offset so we can restore it afterwards.
         let saved_offset = inst.parser.screen().scrollback();
 
-        // Set scrollback offset such that abs_row appears as display row 0.
-        // When offset = max_scrollback, screen row 0 = scrollback top (abs_row 0).
-        // When offset = 0, screen row 0 = first visible line (abs_row max_scrollback).
-        // So: offset_needed = max_scrollback - abs_row
-        let offset_needed = max_scrollback.saturating_sub(abs_row);
-        inst.parser.screen_mut().set_scrollback(offset_needed);
-
-        // Read cells from display row 0
+        // Read the row at abs_row.
+        // abs_row 0..max_scrollback are in the scrollback buffer.
+        // abs_row max_scrollback..(max_scrollback+rows) are on the visible screen.
         let mut result = Vec::with_capacity(cols);
-        for col in 0..cols {
-            if let Some(vt_cell) = inst.parser.screen().cell(0, col as u16) {
-                result.push(convert_cell(vt_cell));
-            } else {
-                result.push(Cell::default());
+        if abs_row < max_scrollback {
+            // Scrollback region: set offset so that abs_row appears as display row 0.
+            let offset_needed = max_scrollback - abs_row;
+            inst.parser.screen_mut().set_scrollback(offset_needed);
+            for col in 0..cols {
+                if let Some(vt_cell) = inst.parser.screen().cell(0, col as u16) {
+                    result.push(convert_cell(vt_cell));
+                } else {
+                    result.push(Cell::default());
+                }
+            }
+        } else {
+            // Screen region: reset scrollback to 0, read the appropriate screen row.
+            inst.parser.screen_mut().set_scrollback(0);
+            let screen_row = (abs_row - max_scrollback) as u16;
+            for col in 0..cols {
+                if let Some(vt_cell) = inst.parser.screen().cell(screen_row, col as u16) {
+                    result.push(convert_cell(vt_cell));
+                } else {
+                    result.push(Cell::default());
+                }
             }
         }
 
