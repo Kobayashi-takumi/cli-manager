@@ -188,10 +188,29 @@ impl PtyPort for PortablePtyAdapter {
             .remove(&id)
             .ok_or(AppError::TerminalNotFound(id))?;
 
-        // Best-effort kill: process may have already exited, so ignore kill errors.
-        // Always reap the child to avoid zombies and free resources.
-        let _ = instance.child.kill();
-        let _ = instance.child.wait();
+        // Send SIGKILL directly instead of portable-pty's kill() which sends SIGHUP.
+        // SIGHUP can be caught by child processes (e.g. Claude Code), causing child.wait()
+        // to block indefinitely and freezing the main event loop.
+        if let Some(pid) = instance.child.process_id() {
+            // SAFETY: pid is a valid process ID obtained from the child handle.
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+        }
+
+        // Try to reap synchronously; if not yet exited, delegate to a background thread
+        // so the main loop is never blocked.
+        if let Ok(Some(_)) = instance.child.try_wait() {
+            return Ok(());
+        }
+
+        std::thread::Builder::new()
+            .name(format!("pty-reaper-{}", id.value()))
+            .spawn(move || {
+                let _ = instance.child.wait();
+            })
+            .ok();
+
         Ok(())
     }
 }

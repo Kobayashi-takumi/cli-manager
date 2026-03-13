@@ -55,10 +55,9 @@ impl<P: PtyPort, S: ScreenPort> TerminalUsecase<P, S> {
         let id = terminal.id();
 
         // Best-effort cleanup: always complete removal even if kill/remove fails.
-        // This prevents ghost terminals that exist in the Vec but have no PTY/Screen.
-        if terminal.status().is_running() {
-            let _ = self.pty_port.kill(id);
-        }
+        // Always call kill() regardless of terminal status so the PTY instance
+        // (FD, reader, writer, child handle) is removed from the HashMap.
+        let _ = self.pty_port.kill(id);
         let _ = self.screen_port.remove(id);
         self.terminals.remove(index);
 
@@ -199,9 +198,9 @@ impl<P: PtyPort, S: ScreenPort> TerminalUsecase<P, S> {
             .ok_or(AppError::TerminalNotFound(id))?;
 
         // Best-effort cleanup: always complete removal even if kill/remove fails.
-        if self.terminals[index].status().is_running() {
-            let _ = self.pty_port.kill(id);
-        }
+        // Always call kill() regardless of terminal status so the PTY instance
+        // (FD, reader, writer, child handle) is removed from the HashMap.
+        let _ = self.pty_port.kill(id);
         let _ = self.screen_port.remove(id);
         self.terminals.remove(index);
 
@@ -817,6 +816,29 @@ mod tests {
 
         assert!(uc.get_terminals().is_empty());
         assert_eq!(uc.get_active_index(), None);
+    }
+
+    #[test]
+    fn close_active_terminal_calls_kill_even_for_exited_terminal() {
+        let pty = MockPtyPort::new();
+        let kill_calls = pty.kill_calls.clone();
+        let screen = MockScreenPort::new();
+        let mut uc = make_usecase_with_ports(pty, screen);
+        let size = default_size();
+
+        let id = uc.create_terminal(Some("t1".to_string()), size).unwrap();
+
+        // Simulate exit: set try_wait result and poll to mark terminal as Exited
+        uc.pty_port.set_try_wait_result(id, Ok(Some(0)));
+        uc.poll_all().unwrap();
+        assert!(!uc.get_terminals()[0].status().is_running());
+
+        // Close the exited terminal — kill() must still be called to clean up PTY resources
+        uc.close_active_terminal().unwrap();
+
+        let calls = kill_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], id);
     }
 
     // =========================================================================
@@ -1854,6 +1876,31 @@ mod tests {
         assert_eq!(uc.get_active_index(), Some(0));
         assert_eq!(uc.get_active_terminal().unwrap().name(), "t1");
         assert_eq!(uc.get_terminals().len(), 2);
+    }
+
+    #[test]
+    fn close_by_id_calls_kill_even_for_exited_terminal() {
+        let pty = MockPtyPort::new();
+        let kill_calls = pty.kill_calls.clone();
+        let screen = MockScreenPort::new();
+        let mut uc = make_usecase_with_ports(pty, screen);
+        let size = default_size();
+
+        let id1 = uc.create_terminal(Some("t1".to_string()), size).unwrap();
+        let _id2 = uc.create_terminal(Some("t2".to_string()), size).unwrap();
+
+        // Simulate exit of t1
+        uc.pty_port.set_try_wait_result(id1, Ok(Some(0)));
+        uc.poll_all().unwrap();
+        assert!(!uc.get_terminals()[0].status().is_running());
+
+        // Close the exited terminal — kill() must still be called to clean up PTY resources
+        uc.close_by_id(id1).unwrap();
+
+        let calls = kill_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], id1);
+        assert_eq!(uc.get_terminals().len(), 1);
     }
 
     // =========================================================================
